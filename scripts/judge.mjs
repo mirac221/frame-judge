@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const HELP = `judge.mjs <command> [options]   (state lives in ./.frame-judge, or --dir / FRAME_JUDGE_DIR)
@@ -11,6 +12,7 @@ const HELP = `judge.mjs <command> [options]   (state lives in ./.frame-judge, or
   set      critic-model | max-rounds | min-confidence | kind  <value>
   bundle   <capture dir|file>... [--include-video] [--force]
   gate     --review <file|->  [--reviewer subagent|headless|human|self] [--model name]
+           [--transcript auto|<file.jsonl>]   verify coverage and code-blindness from the critic's real tool calls
   respond  <finding-id> fixed|disputed|wont-fix "<note>" [--evidence image] [--quote "brief words"]
   status   [--json]`;
 
@@ -420,6 +422,81 @@ function cmdBundle(args) {
   console.log(`\nSave its reply to ${rel(path.join(roundDir, 'review.json'))}, then: judge.mjs gate --review ${rel(path.join(roundDir, 'review.json'))} --reviewer subagent`);
 }
 
+const pathKey = (p) => {
+  const k = String(p).replace(/\\/g, '/').replace(/^\/([a-z])\//i, '$1:/');
+  return process.platform === 'win32' ? k.toLowerCase() : k;
+};
+
+function readToolUses(file) {
+  const uses = new Map();
+  const walk = (o) => {
+    if (!o || typeof o !== 'object') return;
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    if (o.type === 'tool_use' && o.name && o.id) uses.set(o.id, o);
+    for (const v of Object.values(o)) walk(v);
+  };
+  for (const line of readText(file).split('\n')) {
+    if (!line.trim()) continue;
+    try { walk(JSON.parse(line)); } catch {}
+  }
+  return [...uses.values()];
+}
+
+function auditTranscript(file, roots) {
+  const rootKeys = roots.map((r) => pathKey(path.resolve(r)).replace(/\/+$/, ''));
+  const inside = (p) => {
+    const k = pathKey(path.resolve(String(p)));
+    return rootKeys.some((r) => k === r || k.startsWith(`${r}/`));
+  };
+  const opened = new Set();
+  const leaks = [];
+  for (const u of readToolUses(file)) {
+    const input = u.input || {};
+    if (/^(SubagentHandback|StructuredOutput|TodoWrite)$/i.test(u.name)) continue;
+    if (u.name === 'Read') {
+      const p = String(input.file_path || '');
+      if (p && inside(p)) opened.add(p); else leaks.push(`Read ${p}`);
+      continue;
+    }
+    if (/^(Bash|PowerShell)$/i.test(u.name)) {
+      const cmd = String(input.command || '');
+      const start = cmd.match(/^\s*cd\s+(["']?)([^"'&;|]+)\1\s*(&&|;)/);
+      const absPaths = cmd.match(/[A-Za-z]:[\\/][^\s"'`|;&<>]*|\/[a-z]\/[^\s"'`|;&<>]*/g) || [];
+      const safe = start && inside(start[2]) && !/(^|[\s"'/\\])\.\.([/\\]|$)/.test(cmd)
+        && (cmd.match(/\bcd\s/g) || []).length === 1 && absPaths.every(inside);
+      if (!safe) leaks.push(`${u.name}: ${trunc(cmd, 120)}`);
+      continue;
+    }
+    const target = input.file_path || input.path || input.pattern || input.url || '';
+    leaks.push(`${u.name}${target ? ` ${trunc(target, 100)}` : ''}`);
+  }
+  return { file, opened, leaks };
+}
+
+function findTranscript(bundleAbs, sinceMs) {
+  const root = path.join(os.homedir(), '.claude', 'projects');
+  if (!exists(root)) return null;
+  const needles = [bundleAbs, bundleAbs.replace(/\\/g, '/'), JSON.stringify(bundleAbs).slice(1, -1)];
+  let best = null;
+  for (const proj of fs.readdirSync(root)) {
+    let sessions;
+    try { sessions = fs.readdirSync(path.join(root, proj), { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { continue; }
+    for (const s of sessions) {
+      const sub = path.join(root, proj, s.name, 'subagents');
+      let files;
+      try { files = fs.readdirSync(sub).filter((f) => f.endsWith('.jsonl')); } catch { continue; }
+      for (const f of files) {
+        const fp = path.join(sub, f);
+        const mtime = fs.statSync(fp).mtimeMs;
+        if (mtime < sinceMs || (best && mtime <= best.mtime)) continue;
+        const text = readText(fp);
+        if (needles.some((n) => text.includes(n))) best = { file: fp, mtime };
+      }
+    }
+  }
+  return best && best.file;
+}
+
 function cmdGate(args) {
   const dir = stateDir(args);
   const ledger = loadLedger(dir);
@@ -492,16 +569,38 @@ function cmdGate(args) {
   const isMeasurementRef = (ref) => measurementKeys.size > 0 && /measurement/i.test(String(ref ?? ''));
   const namesMeasurement = (text) => [...measurementKeys].some((k) => String(text).toLowerCase().includes(k));
 
+  let audit = null;
+  const transcriptArg = args.transcript && args.transcript !== true ? String(one(args.transcript)) : null;
+  if (transcriptArg) {
+    const tfile = transcriptArg === 'auto'
+      ? findTranscript(path.resolve(bundleDir), Date.parse(entry.created_at) - 60000)
+      : path.resolve(transcriptArg);
+    if (tfile && exists(tfile)) audit = auditTranscript(tfile, [bundleDir, ...many(args['transcript-bundle']).map(String)]);
+    else warnings.push(transcriptArg === 'auto' ? 'no critic transcript found for this bundle, so coverage is self-reported' : `transcript not found: ${transcriptArg}`);
+  }
+
   const visual = manifest.artifacts.filter((a) => IMAGE_EXT.has(path.extname(a.file).toLowerCase())).map((a) => a.id);
   const openedRaw = Array.isArray(review.opened) ? review.opened.map(String) : null;
-  const opened = openedRaw ? new Set(openedRaw.map(resolveArtifact).filter(Boolean)) : null;
+  const observed = audit
+    ? new Set([...audit.opened].filter((p) => /[\\/]artifacts[\\/]/.test(p)).map((p) => resolveArtifact(path.basename(p))).filter(Boolean))
+    : null;
+  const opened = observed || (openedRaw ? new Set(openedRaw.map(resolveArtifact).filter(Boolean)) : null);
+  const coverageSource = observed ? 'verified' : openedRaw ? 'self-reported' : 'unknown';
   const skipped = opened ? visual.filter((id) => !opened.has(id)) : visual;
   if (!opened) warnings.push('the critic didn\'t list what it opened ("opened"), so coverage can\'t be checked');
   else {
-    const unknownOpened = openedRaw.filter((r) => !resolveArtifact(r) && !isMeasurementRef(r));
-    if (unknownOpened.length) warnings.push(`"opened" lists unknown artifact(s): ${unknownOpened.join(', ')}`);
-    if (skipped.length) notes.push(`coverage: the critic opened ${visual.length - skipped.length} of ${visual.length} images and skipped ${skipped.join(', ')}`);
+    if (openedRaw) {
+      const unknownOpened = openedRaw.filter((r) => !resolveArtifact(r) && !isMeasurementRef(r));
+      if (unknownOpened.length) warnings.push(`"opened" lists unknown artifact(s): ${unknownOpened.join(', ')}`);
+    }
+    if (observed && openedRaw) {
+      const claimedNotOpened = openedRaw.map(resolveArtifact).filter((id) => id && !observed.has(id));
+      if (claimedNotOpened.length) notes.push(`the critic claimed to open ${claimedNotOpened.join(', ')}, but its transcript shows it never did`);
+    }
+    if (skipped.length) notes.push(`coverage (${coverageSource}): the critic opened ${visual.length - skipped.length} of ${visual.length} images and skipped ${skipped.join(', ')}`);
   }
+  const leaked = Boolean(audit && audit.leaks.length);
+  if (leaked) notes.push(`the critic touched things outside its bundle, so this review isn't code-blind and doesn't count: ${audit.leaks.slice(0, 5).join('; ')}`);
 
   const checkEvidence = (ev) => {
     const list = Array.isArray(ev) ? ev : ev ? [ev] : [];
@@ -625,7 +724,7 @@ function cmdGate(args) {
 
   const coverageGap = !opened || skipped.length > 0;
   let decision;
-  if (unusable) decision = attempt >= 2 ? 'STOP_CRITIC_UNRELIABLE' : 'RERUN_CRITIC';
+  if (leaked || unusable) decision = attempt >= 2 ? 'STOP_CRITIC_UNRELIABLE' : 'RERUN_CRITIC';
   else if (blockingCount === 0 && coverageGap) {
     decision = attempt >= 2 ? 'STOP_CRITIC_UNRELIABLE' : 'RERUN_CRITIC';
     notes.push('nothing blocking was found, but a pass needs every image looked at, and this critic skipped some or didn\'t say what it opened.');
@@ -646,8 +745,8 @@ function cmdGate(args) {
     if (verdict && verdict !== 'pass' && blockingCount === 0) notes.push(`the critic said "${verdict}", but nothing it reported clears the must-fix bar (blocker or major at confidence ≥ ${minConf}). The gate passes it; polish items are listed.`);
   }
 
-  const coverage = opened ? `${visual.length - skipped.length}/${visual.length}` : 'unknown';
-  const counts = { must_fix: buckets.must_fix.length, verify: buckets.verify.length, polish: buckets.polish.length, ignored: buckets.ignored.length, rejected: rejected.length, resolved: resolvedNow, blocking: blockingCount, coverage };
+  const coverage = opened ? `${visual.length - skipped.length}/${visual.length} ${coverageSource}` : 'unknown';
+  const counts = { must_fix: buckets.must_fix.length, verify: buckets.verify.length, polish: buckets.polish.length, ignored: buckets.ignored.length, rejected: rejected.length, resolved: resolvedNow, blocking: blockingCount, coverage, transcript_leaks: audit ? audit.leaks.length : null };
   if (!discard) {
     for (const r of rulings) {
       const pf = ledger.findings[r.id];
@@ -816,7 +915,7 @@ function cmdStatus(args) {
   const passed = ['PASS', 'SELF_PASS'].includes(last.decision);
 
   L('\n--- report block (paste this, then add context) ---');
-  L(`Critic: ${last.decision} on round ${last.round} of ${ledger.max_rounds} (${last.reviewer}${last.model ? `, model ${last.model}` : ''}, ${independent ? 'code-blind' : 'SELF-REVIEW, not independent'})`);
+  L(`Critic: ${last.decision} on round ${last.round} of ${ledger.max_rounds} (${last.reviewer}${last.model ? `, model ${last.model}` : ''}, ${independent ? 'code-blind' : 'SELF-REVIEW, not independent'}${last.counts && last.counts.coverage ? `, images opened ${last.counts.coverage}` : ''})`);
   if (firstGut) L(`Round ${firstGut.round} gut reaction: "${firstGut.gut_reaction}"`);
   if (!passed) L(`Not passed. ${open.filter(([, f]) => f.bucket === 'must_fix').length} must-fix item(s) still open.`);
   if (fixed.length) L(`Fixed: ${fixed.map(([id, f]) => label(id, f)).join(' · ')}`);

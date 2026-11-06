@@ -9,7 +9,8 @@ const HELP = `video-frames.mjs <video> --out <dir> [options]
   --keyframes N         full-detail single frames, long edge capped at 1568px
   --motion a-b          seconds to cut into filmstrips + a motion trail; repeatable
                         (default: the whole clip when it is 6 s or shorter)
-  --motion-fps 12       filmstrip frame rate (capped at the source fps)
+  --motion-fps 12       filmstrip sample rate, or "source" for every frame (capped at the source fps)
+  --events 2            auto-detect up to N sudden jumps/stalls and add full-rate strips around them (0 = off)
   --cols 4 --rows 3     filmstrip grid
   --width 1536          sheet width in px
   --diffs               also write frame-difference strips
@@ -184,9 +185,42 @@ function keyframes(input, meta, o, cap) {
   });
 }
 
-function strips(input, meta, o, cap, [a, b], prefix, filters, type, describe, shift = 0) {
+const sampling = (mf, meta) => {
+  const step = meta.fps / mf;
+  return step <= 1.05 ? `every frame of the ${fx(meta.fps, 2)} fps source` : `sampled at ${fx(mf, 2)} fps from a ${fx(meta.fps, 2)} fps source (about 1 frame in ${fx(step, 1)}, so very short events can fall between tiles)`;
+};
+
+function motionEvents(input, meta, limit) {
+  const r = run('ffmpeg', ['-hide_banner', '-nostats', '-i', input, '-map', '0:v:0', '-vf', 'format=gray,tblend=all_mode=difference,signalstats,metadata=print:key=lavfi.signalstats.YAVG', '-f', 'null', '-']);
+  const points = [];
+  let t = null;
+  for (const line of String(r.stderr || '').split('\n')) {
+    const pt = line.match(/pts_time:\s*([\d.]+)/);
+    if (pt) { t = Number(pt[1]); continue; }
+    const v = line.match(/lavfi\.signalstats\.YAVG=([\d.]+)/);
+    if (v && t !== null) { points.push({ t, v: Number(v[1]) }); t = null; }
+  }
+  if (points.length < 8) return [];
+  const sorted = points.map((p) => p.v).sort((x, y) => x - y);
+  const floor = Math.max(0.3, sorted[Math.floor(sorted.length / 2)] * 0.5);
+  const found = [];
+  points.forEach((p, i) => {
+    const near = points.slice(Math.max(0, i - 4), i + 5).filter((_, j) => j !== Math.min(i, 4));
+    const local = near.reduce((s, x) => s + x.v, 0) / near.length;
+    if (p.v > floor && p.v > 2.5 * local) found.push({ t: fx(p.t), kind: 'jump', strength: fx(p.v / Math.max(local, 0.01), 1) });
+    else if (local > floor && p.v < 0.15 * local) found.push({ t: fx(p.t), kind: 'stall', strength: fx(local / Math.max(p.v, 0.01), 1) });
+  });
+  const picked = [];
+  for (const e of found.sort((x, y) => y.strength - x.strength)) {
+    if (picked.length >= limit) break;
+    if (picked.every((q) => Math.abs(q.t - e.t) > 0.5)) picked.push(e);
+  }
+  return picked.sort((x, y) => x.t - y.t);
+}
+
+function strips(input, meta, o, cap, [a, b], prefix, filters, type, describe, shift = 0, rate = null) {
   const d = fx(b - a);
-  const mf = Math.min(o.motionFps, meta.fps);
+  const mf = rate || Math.min(o.motionFps, meta.fps);
   const tw = tileWidth(o.width, o.cols);
   const size = Math.max(14, Math.round(tw / 16));
   const per = o.cols * o.rows;
@@ -211,7 +245,7 @@ function strips(input, meta, o, cap, [a, b], prefix, filters, type, describe, sh
       file,
       type,
       window: [a, b],
-      shows: `${describe(fx(mf, 2))}, t=${tiles[0].t}s to ${tiles[tiles.length - 1].t}s (${tiles.length} tiles), read left to right, top to bottom${labels ? '; tiles stamped in ms' : ''}`,
+      shows: `${describe(sampling(mf, meta))}, t=${tiles[0].t}s to ${tiles[tiles.length - 1].t}s (${tiles.length} tiles), read left to right, top to bottom${labels ? '; tiles stamped in ms' : ''}`,
       tiles,
     });
   });
@@ -284,12 +318,14 @@ const o = {
   rows: int(args.rows, 3, 1),
   width: int(args.width, 1536, 320),
   motionFps: Number(one(args['motion-fps'])) > 0 ? Number(one(args['motion-fps'])) : 12,
+  events: int(args.events, 2, 0),
 };
 fs.mkdirSync(o.out, { recursive: true });
 labels = !args['no-labels'] && Boolean(font);
 
 const meta = probe(input);
 if (!(meta.duration > 0)) die('could not work out the clip duration');
+if (/^(source|full)$/i.test(String(one(args['motion-fps']) ?? ''))) o.motionFps = meta.fps;
 
 const windows = [];
 for (const w of [].concat(args.motion ?? []).filter((x) => x !== true)) {
@@ -315,12 +351,21 @@ const cap = {
 if (o.overview > 0) overview(input, meta, o, cap);
 if (o.keyframes > 0) keyframes(input, meta, o, cap);
 windows.forEach((w, i) => {
-  strips(input, meta, o, cap, w, `strip-${i + 1}`, [], 'filmstrip', (fps) => `consecutive frames at ${fps} fps`);
+  strips(input, meta, o, cap, w, `strip-${i + 1}`, [], 'filmstrip', (s) => `frames ${s}`);
   trail(input, meta, o, cap, w, i + 1);
   if (args.diffs) {
     strips(input, meta, o, cap, w, `diff-${i + 1}`, ['format=gray', 'tblend=all_mode=difference', "lut=c0='min(val*4,255)'"], 'diff_strip',
-      (fps) => `frame-to-frame differences at ${fps} fps (bright = changed since the previous frame, black = unchanged)`, 1);
+      (s) => `frame-to-frame differences, ${s} (bright = changed since the previous frame, black = unchanged)`, 1);
   }
+});
+
+const events = o.events > 0 ? motionEvents(input, meta, o.events) : [];
+events.forEach((e, i) => {
+  const half = 6 / meta.fps;
+  const a = fx(Math.max(0, e.t - half));
+  const b = fx(Math.min(meta.duration, e.t + half));
+  strips(input, meta, o, cap, [a, b], `dense-${i + 1}`, [], 'filmstrip',
+    (s) => `${s}, centred on a sudden motion ${e.kind === 'jump' ? 'jump (possible pop or teleport)' : 'stall (possible dropped or repeated frame)'} detected at t=${e.t}s; may be intentional`, 0, meta.fps);
 });
 
 cap.measurements = {
@@ -333,6 +378,7 @@ cap.measurements = {
   pix_fmt: meta.pix_fmt,
   audio: audio(input, meta),
   ...(args['no-detect'] ? {} : detect(input, meta)),
+  motion_events: events,
 };
 cap.artifacts.push({
   id: 'video',

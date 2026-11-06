@@ -31,14 +31,19 @@ Every platform has the same three non-negotiables:
 - `prompt`: the spawn message, verbatim.
 - The subagent's final message is the review. Save it to `round-N/review.json` as-is.
 
-**Headless fallback:** a separate process, and the strongest isolation. Its working directory *is* the bundle:
+**Enforcement:**
+- **Plugin installs:** the plugin's `PreToolUse` hook (`scripts/critic-guard.mjs`) fires inside subagents. For any agent whose type is `frame-critic`, it allows only `Read` on files inside a `.frame-judge/round-N/bundle/` folder, after resolving `..` and symlinks. Everything else is denied. Other sessions and agents pass through untouched.
+- **Plain-skill installs:** have no hook, so code-blindness rests on the agent's instructions, and the transcript audit below catches violations after the fact.
+- **Gating:** gate with `--transcript auto`. The gate finds the critic's subagent transcript under `~/.claude/projects/`, counts the images it actually read, and voids the review if it touched anything outside the bundle.
+
+**Sandboxed critic (strongest isolation):**
 ```bash
-cd .frame-judge/round-1/bundle
-claude -p --model sonnet --tools "Read" --max-turns 30 --no-session-persistence \
-  "You are the frame critic. Your bundle is the current directory. Read CRITIC.md and follow it exactly. Open nothing outside this folder. Reply with the review JSON only." \
-  > ../review.json
+node <skill>/scripts/critic-sandbox.mjs --model sonnet
 ```
-Optionally add `--json-schema "$(cat <skill>/references/review.schema.json)"` so the CLI validates the output too. With `--output-format json`, the gate also unwraps the result envelope.
+- It copies the bundle to a private temp folder outside the project.
+- It runs `claude -p` there with only the `Read` tool, no MCP servers, and the guard hook pinned to that copy.
+- It records the critic's tool calls, then gates the review with that transcript and deletes the copy.
+- It uses your Claude plan. It doesn't work with `--bare`, which skips the login.
 
 ## Codex (CLI, IDE extension, app)
 
@@ -55,7 +60,11 @@ Optionally add `--json-schema "$(cat <skill>/references/review.schema.json)"` so
   - the headless fallback below, which takes `-m`.
 - **Defaults for every subagent:** `[agents] default_subagent_model` in `config.toml`.
 
-**Isolation:** there's no per-agent read-only sandbox; subagents inherit the parent's sandbox. The agent's instructions confine it to the bundle. For tighter isolation, set `features.shell_tool = false` in the TOML and paste `packet.md` into the spawn message. The critic then only needs `view_image`.
+**Isolation:** there's no per-agent read-only sandbox; subagents inherit the parent's sandbox. The agent's instructions confine it to the bundle, but nothing enforces that, and coverage is the critic's own `opened` list. To tighten it:
+- Set `features.shell_tool = false` in the TOML and paste `packet.md` into the spawn message, so the critic only needs `view_image`.
+- If the Claude Code CLI is also installed, run the critic with `critic-sandbox.mjs` instead.
+
+Either way, tell the user which one you used.
 
 **Images:** the critic looks at images with the built-in `view_image` tool. It's on by default; the setting is `[tools] view_image` in `config.toml`.
 
@@ -78,6 +87,8 @@ codex exec -m <model> -s read-only -o ../review.json \
 **Model question: don't ask.** Antigravity has no per-spawn model choice. The critic runs on its agent file's setting, `model: inherit` (the parent's model), and that's what you tell the user. A user who wants a fixed tier can change that line to `flash` or `pro` themselves; those are Gemini tiers and draw from the Gemini quota pool, not the Claude/GPT one.
 
 **Spawn:** call `invoke_subagent` with the `frame-critic` agent and the spawn message. Workspace mode `inherit` is fine, because the critic only reads. If the agent file isn't installed, `define_subagent` can create a transient critic; give it the body of `agents/antigravity/frame-critic.md`.
+
+**Isolation:** the agent file grants only `view_file`, but nothing restricts which files it opens, and coverage is self-reported. If the Claude Code CLI is installed, `critic-sandbox.mjs` gives enforced isolation.
 
 **Tools:** the agent file grants only `view_file`. Tool names must be exact; a misspelled one can hang the subagent. If the critic reports it can't see images through `view_file` on your version, switch to the human relay, or use a fresh Agent Manager conversation as the critic.
 

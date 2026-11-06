@@ -95,7 +95,8 @@ node <skill>/scripts/video-frames.mjs <video> --out <dir> [options]
 | `--overview N` | `16` | Tiles in the contact sheet; `0` skips it |
 | `--keyframes N` | 4 / 2 | Full-resolution single frames, long edge capped at 1568 px |
 | `--motion a-b` | whole clip if ≤ 6 s | Window in seconds to cut into filmstrips plus a motion trail. Repeatable. |
-| `--motion-fps N` | `12` | Filmstrip frame rate, capped at the source fps |
+| `--motion-fps N` | `12` | Filmstrip sample rate, capped at the source fps. `source` shows every frame. At 12 fps from a 30 fps clip, 3 frames in 5 are skipped, so a one-frame glitch can fall between tiles. |
+| `--events N` | `2` | Scans every source frame for sudden jumps (pops, teleports) and stalls (dropped or repeated frames), and adds a full-rate `dense-N` strip around each, up to N. `0` turns it off. Detected events are listed in `motion_events`. |
 | `--cols N` / `--rows N` | `4` / `3` | Filmstrip grid: 12 frames per image |
 | `--width px` | `1536` | Sheet width |
 | `--diffs` | off | Also writes frame-difference strips: bright means it changed. Good for flicker and jitter. |

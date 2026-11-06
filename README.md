@@ -30,7 +30,7 @@ Each finding behind that verdict pointed at specific frames, and a script checke
 ## What changes for you
 
 - **The model question:** your AI asks once which model the critic should use, on agents that support it (Claude Code, Codex). Cheaper or sharper, your call.
-- **Everything gets checked:** phone, tablet and desktop; hover and error states; every frame of an animation.
+- **Everything gets checked:** phone, tablet and desktop; hover and error states; the whole animation as timestamped frame strips. Strips are sampled (12 fps by default), with every frame shown around any sudden jump or stall it detects.
 - **A verdict, not "looks great!":** you get the critic's verdict, what got fixed, and what's still open.
 - **No endless loops:** at most 3 review rounds.
 
@@ -62,7 +62,7 @@ On Windows PowerShell, use `$HOME\...` instead of `~/...`.
 
 **2. Copy the critic file** for your agent into its agents folder. Create the folder if it doesn't exist.
 
-**3. Claude Code only, optional:** you can install it as a plugin instead, which brings the skill and the critic together: `claude plugin marketplace add mirac221/frame-judge`, then `claude plugin install frame-judge@frame-judge`.
+**3. Claude Code: prefer the plugin.** It brings the skill, the critic, and a hook that blocks the critic from reading anything outside its review folder: `claude plugin marketplace add mirac221/frame-judge`, then `claude plugin install frame-judge@frame-judge`.
 
 **4. Check the requirements:** run `node --version` (needs 18+) and `ffmpeg -version`. If either is missing, tell the user how to get it. Don't install system software without asking.
 
@@ -112,11 +112,13 @@ Copy-Item "$HOME\.claude\skills\frame-judge\agents\claude-code\frame-critic.md" 
 
 | Problem | What frame-judge does |
 |---|---|
-| The builder grades its own work | The critic never sees the code, the builder's reasoning, or its "I fixed it" claims. A script checks the critic's instructions weren't edited to go easy. |
+| The builder grades its own work | The critic never gets the code, the builder's reasoning, or its "I fixed it" claims. A script checks the critic's instructions weren't edited to go easy. |
+| The critic peeks at the code anyway | On Claude Code this is enforced, not just asked for. A hook blocks the critic from reading anything outside its review folder, and the gate audits its transcript and throws out any review that touched other files. For the strongest setup, a sandbox script runs the critic as a separate process on a private copy of the folder. Codex and Antigravity have no per-agent file sandbox, so there it's instruction-only. |
 | The critic only criticizes | Every criticism needs evidence. A pass is a legitimate verdict, and the critic must name what works so fixes don't break it. |
 | "Good" is subjective | Written rubrics for websites, motion and video, with 1–5 scores and named red flags: foot sliding, linear easing, AI-template tells, and more. |
 | The critic makes things up | A finding has to cite a frame it actually opened, or quote your request word for word. Otherwise it's thrown out. Unsure findings get a closer capture, not a blind fix. |
-| The critic skims | It must list every frame it opened. A pass from a critic that skipped frames doesn't count. |
+| The critic skims | A pass only counts if the critic opened every image. On Claude Code that's checked against the critic's actual file reads in its transcript, so claiming it looked doesn't work. Elsewhere it's the critic's own list. |
+| Short glitches hide between sampled frames | The video tool scans every source frame for sudden jumps and stalls and adds full-rate strips around them. `--motion-fps source` shows every frame everywhere. |
 | Builder and critic talk past each other | Findings have IDs. The builder answers each one: fixed, disputed (with screenshots, never code), or won't fix (quoting your request). |
 | It loops forever | At most 3 rounds, and it stops early if a round fixes nothing. |
 | Agents differ | It uses a real subagent where the agent has one, a separate CLI critic where it doesn't, or a clearly labeled self-review as a last resort. |
@@ -137,9 +139,12 @@ references/
   craft.md               how to build it well the first time
 scripts/
   capture-page.mjs       screenshots per device and state, frame-exact animation to MP4
-  video-frames.mjs       contact sheets, filmstrips, motion trails, black/frozen-frame checks
-  judge.mjs              locks the request, builds the review packet, checks the verdict
+  video-frames.mjs       contact sheets, filmstrips, motion trails, jump/stall detection, black/frozen-frame checks
+  judge.mjs              locks the request, builds the review packet, checks the verdict and the critic's transcript
+  critic-guard.mjs       hook that blocks the critic from reading outside its review folder
+  critic-sandbox.mjs     runs the critic as a separate, locked-down Claude Code process
 agents/                  the critic for Claude Code, Codex and Antigravity
+hooks/                   the Claude Code plugin hook that runs critic-guard
 .claude-plugin/          Claude Code plugin files
 ```
 

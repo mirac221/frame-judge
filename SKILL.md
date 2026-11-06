@@ -4,7 +4,7 @@ description: Build frontends, UI animations, motion graphics and videos, then pr
 license: Apache-2.0
 compatibility: Node 18+, ffmpeg and ffprobe on PATH, and Playwright (or playwright-core plus an installed Chrome/Edge) for page capture. Native critic subagents on Claude Code, Codex and Antigravity; other agents fall back to a headless, human-relayed or clearly labeled self review.
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # frame-judge
@@ -81,7 +81,7 @@ What you get:
 - **Viewport slices** instead of one giant full-page image, which would get downscaled into mush.
 - **State shots** from your actions file.
 - **A timestamped contact sheet.**
-- **Filmstrips** of consecutive frames.
+- **Filmstrips**: frames sampled at 12 fps by default, plus full-rate strips around any sudden jump or stall the script detects (`--motion-fps source` gives every frame everywhere). Sampled means a one-frame glitch can fall between tiles, which is why the event detection exists.
 - **Motion trails**: whatever should stay still stays sharp, and whatever slides smears.
 - **Objective numbers**: duration, fps, black or frozen segments, horizontal overflow, broken images.
 
@@ -139,18 +139,21 @@ Use a **fresh** critic every round, so it has no memory beyond `prior.json` and 
 - **Add nothing.** No summary of what you built, no "focus on the header", no "I fixed the legs". Your opinion is the one input the critic must never get. If the user wants something checked, it's already in the brief, in their words.
 - **No forks.** Never run the critic as a fork or anything else that inherits context. It would see your whole conversation, code included.
 - **Prefer the installed agent.** Use `frame-critic` if it exists, because it's limited to reading files. Its name is `frame-judge:frame-critic` when the skill came in as a Claude Code plugin, and `frame_critic` in Codex. Otherwise use a general-purpose subagent with the same message.
+- **Claude Code enforces code-blindness.** The plugin's hook blocks the `frame-critic` agent from reading anything outside a `.frame-judge/round-N/bundle/` folder. For the strongest isolation, run `node <skill>/scripts/critic-sandbox.mjs` instead of spawning a subagent: it runs the critic as a separate headless process on a private copy of the bundle, with only the Read tool, and gates the review itself. Codex and Antigravity have no per-agent file sandbox, so there it rests on the critic's instructions; say so in your report.
 
 Save the reply, untouched, to `.frame-judge/round-N/review.json`.
 
 ## 7. Gate
 
 ```bash
-node <skill>/scripts/judge.mjs gate --review .frame-judge/round-N/review.json --reviewer subagent
+node <skill>/scripts/judge.mjs gate --review .frame-judge/round-N/review.json --reviewer subagent --transcript auto
 ```
+On Claude Code, `--transcript auto` finds the critic subagent's transcript, so the gate counts the images it really opened (not the ones it claims) and voids the review if it touched anything outside the bundle. Elsewhere, leave the flag off; coverage is then self-reported, and the report says so. (`critic-sandbox.mjs` passes its own transcript automatically.)
 
 The gate decides, not the critic's mood and not you. It:
 - **Rejects** findings that cite artifact IDs that don't exist or that the critic never opened, findings with no evidence, brief quotes that aren't in the brief, and bad severity or confidence values.
-- **Checks coverage:** the critic has to list every artifact it opened, and a pass only counts if it opened every image.
+- **Checks coverage:** a pass only counts if the critic opened every image, verified from its transcript where one exists, otherwise from its own `opened` list.
+- **Checks isolation:** with a transcript, any read outside the bundle voids the review (`RERUN_CRITIC`).
 - **Sorts** the rest:
   - **must-fix**: blocker or major, confidence 0.6 or higher
   - **verify**: blocker or major below 0.6. Recapture closer; don't blind-fix.
@@ -167,7 +170,7 @@ The gate decides, not the critic's mood and not you. It:
 | `RETHINK` | Critic says the approach is wrong at the root | Tell the user before rebuilding |
 | `STOP_MAX_ROUNDS` | Cap hit, still failing | Report what's open, ask whether to continue |
 | `STOP_PLATEAU` | This round resolved nothing | Stop circling. Report, ask |
-| `RERUN_CRITIC` | Review unusable (no JSON, mostly bogus evidence), or a pass from a critic that skipped images | Run a fresh critic on the same bundle |
+| `RERUN_CRITIC` | Review unusable (no JSON, mostly bogus evidence), a pass from a critic that skipped images, or a critic that read outside its bundle | Run a fresh critic on the same bundle |
 | `STOP_CRITIC_UNRELIABLE` | Second unusable review | Suggest a stronger critic model or a fallback |
 
 ## 8. Revise
@@ -209,7 +212,7 @@ Use the first option that works, and tell the user which one you used:
 
 1. **Native subagent, chosen model.** Claude Code, Codex, Antigravity.
 2. **Native subagent, default model.** The platform can't choose; say so.
-3. **Headless critic process.** `claude -p`, `codex exec` or similar, started inside the bundle folder. This is the strongest isolation. Commands are in platforms.md.
+3. **Headless critic process.** `critic-sandbox.mjs` on any machine with the Claude Code CLI (strongest isolation), or `codex exec` started inside the bundle folder. Commands are in platforms.md.
 4. **Human relay.** `bundle` also writes `packet.md`. The user pastes it and the images into any fresh chat with a vision-capable model, then hands you the JSON. Run `gate --reviewer human`.
 5. **Self-review**, last resort. Re-read nothing from the project and play the critic from the bundle alone. `gate --reviewer self` can only ever return `SELF_PASS`, and your report must say the work wasn't independently reviewed.
 6. **No vision at all.** You can't judge visuals. Say so, hand over the captures, and let a human look.
@@ -221,6 +224,7 @@ Use the first option that works, and tell the user which one you used:
 | [references/craft.md](references/craft.md) | Before building (the section for your medium) |
 | [references/capture.md](references/capture.md) | Capture setup, states files, frame-exact animation, HTML to video, ffmpeg recipes |
 | [references/platforms.md](references/platforms.md) | Spawning the critic, the model question and fallbacks, per platform |
+| `scripts/critic-sandbox.mjs`, `scripts/critic-guard.mjs`, `hooks/` | Claude Code isolation: the sandboxed critic runner, and the hook that blocks reads outside the bundle |
 | [references/critic-brief.md](references/critic-brief.md) | Copied into every bundle as `CRITIC.md`. Don't edit it to go easier on yourself; the gate checks it. |
 | `references/rubric-*.md` | What the critic scores. Copied into bundles automatically. |
 | [references/review.schema.json](references/review.schema.json) | The critic's output format, usable with `--json-schema` / `--output-schema` |

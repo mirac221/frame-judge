@@ -2,6 +2,7 @@
 
 How to read the artifacts:
 - **Filmstrips.** Read tile by tile, left to right and top to bottom. Each tile is stamped with its time in ms; `manifest.json` maps every tile to a time.
+- **Sampling.** Most strips are samples (their `shows` says the rate), so a one-frame glitch can fall between tiles. `dense-*` strips show every frame around a sudden jump or stall the capture script detected (`motion_events`); judge whether it's a defect or intended. If motion looks suspicious and no dense strip covers it, add a `requests` entry for full-rate frames of that window.
 - **Motion trails.** These average several frames into one image. Whatever is still stays sharp; whatever moves leaves ghosts along its path.
 - **Scrolling ground.** If the ground or background scrolls, a planted foot must move exactly with it.
 - **Measurements.** Treat `freeze_segments` and `black_segments` as facts, not verdicts. A hold can be intentional.
