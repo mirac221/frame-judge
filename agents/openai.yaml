@@ -1,0 +1,5 @@
+interface:
+  display_name: "frame-judge"
+  short_description: "A code-blind critic judges your visuals before they're called done"
+policy:
+  allow_implicit_invocation: false

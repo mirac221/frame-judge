@@ -7,6 +7,23 @@ Every platform has the same three non-negotiables:
 - **The spawn message `bundle` printed, and nothing else.**
 - **Ask about the model once, and only where the platform lets you choose it** (Claude Code and the Claude apps, Codex app and CLI). Record the answer with `judge.mjs set critic-model …` and reuse it.
 
+## Running only on command
+
+frame-judge is command-only. In ordinary chats, the only thing it costs is its one-paragraph description (about 100 tokens). The instructions load only when the user calls it.
+- **Claude Code, Cursor, Antigravity, anything else:** the description itself says "command-only, never load it on your own". Tested on Claude Code (Sonnet, Haiku) and Antigravity (Gemini): a landing-page request didn't trigger it, and `/frame-judge` did.
+- **Codex CLI, IDE and app:** in addition, `agents/openai.yaml` sets `allow_implicit_invocation: false`, a hard switch.
+- **Don't add `disable-model-invocation: true`.** Claude Code and Cursor support it, but Antigravity then hides the skill completely, `/frame-judge` included (tested). The description gives the same behavior everywhere.
+
+How to invoke it: `/frame-judge` in Claude Code, Cursor and Antigravity (`/frame-judge:frame-judge` as a Claude Code plugin); `$frame-judge` in Codex; `@frame-judge` in the ChatGPT app; "use frame-judge" anywhere else.
+
+## Cursor
+
+**Install:** Cursor reads `~/.cursor/skills/`, `~/.agents/skills/` and `~/.claude/skills/`, plus the same folders in a project. Install the skill in one of them only, or Cursor sees duplicates. If you already installed it for Claude Code or Codex, Cursor picks that copy up.
+
+**Critic:** if your Cursor version has subagents, spawn a fresh one with the spawn message. Otherwise use `critic-sandbox.mjs` (if the Claude Code CLI is installed) or the human relay below. Coverage is self-reported unless you use the sandbox.
+
+**Model question:** ask only if your Cursor version lets you pick a subagent's model.
+
 ## The slop scout (unslop mode)
 
 The scout needs web search.
@@ -41,11 +58,10 @@ If the platform has no web access at all, tell the user unslop mode can't run, a
 - The subagent's final message is the review. Save it to `round-N/review.json` as-is.
 
 **Enforcement:**
-- **Plugin installs:** the plugin's `PreToolUse` hook (`scripts/critic-guard.mjs`) fires inside subagents. For any agent whose type is `frame-critic`, it allows only `Read` on files inside a `.frame-judge/round-N/bundle/` folder, after resolving `..` and symlinks. Everything else is denied. Other sessions and agents pass through untouched.
-- **Plain-skill installs:** have no hook, so code-blindness rests on the agent's instructions, and the transcript audit below catches violations after the fact.
-- **Gating:** gate with `--transcript auto`. The gate finds the critic's subagent transcript under `~/.claude/projects/`, counts the images it actually read, and voids the review if it touched anything outside the bundle.
+- **In-session subagent:** nothing hooks your regular sessions, so code-blindness rests on the agent's instructions. Gate with `--transcript auto`: the gate finds the critic's subagent transcript under `~/.claude/projects/`, counts the images it actually read, and voids the review if it touched anything outside the bundle.
+- **Sandboxed critic:** this is enforced, and it's the default whenever the `claude` CLI is on PATH (see below).
 
-**Sandboxed critic (strongest isolation):**
+**Sandboxed critic (default when the `claude` CLI is available):**
 ```bash
 node <skill>/scripts/critic-sandbox.mjs --model sonnet
 ```

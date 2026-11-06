@@ -1,10 +1,10 @@
 ---
 name: frame-judge
-description: Build frontends, UI animations, motion graphics and videos, then prove they are good instead of claiming it. Use whenever you create or change anything visual - web pages, components, landing pages, dashboards, CSS/JS/canvas/SVG animation, character or sprite animation, HTML-to-video, Remotion, ffmpeg edits, motion design. You render the work, capture screenshots and frame sheets, and a separate code-blind critic subagent judges only the pixels against the user's original words, with evidence, severity and confidence for every finding, inside a capped revise loop. You never grade your own visual work.
+description: Command-only. Run this skill only when the user invokes it by name (/frame-judge, $frame-judge, @frame-judge, or "use frame-judge"). Never load it on your own for ordinary UI, animation or video work. When invoked, you build or fix the frontend, animation or video, render it, capture screenshots and frame sheets, and a separate code-blind critic subagent judges only the pixels against the user's original words, with evidence for every finding, inside a capped revise loop.
 license: Apache-2.0
-compatibility: Node 18+, ffmpeg and ffprobe on PATH, and Playwright (or playwright-core plus an installed Chrome/Edge) for page capture. Native critic subagents on Claude Code, Codex and Antigravity; other agents fall back to a headless, human-relayed or clearly labeled self review.
+compatibility: Agent apps with a shell (Claude Code incl. the Claude desktop app, Codex CLI/app, Antigravity, Cursor). Needs Node 18+, ffmpeg/ffprobe, and Playwright for page capture. Not for chat-only uploads such as claude.ai skills.
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # frame-judge
@@ -163,7 +163,8 @@ Use a **fresh** critic every round, so it has no memory beyond `prior.json` and 
 - **Add nothing.** No summary of what you built, no "focus on the header", no "I fixed the legs". Your opinion is the one input the critic must never get. If the user wants something checked, it's already in the brief, in their words.
 - **No forks.** Never run the critic as a fork or anything else that inherits context. It would see your whole conversation, code included.
 - **Prefer the installed agent.** Use `frame-critic` if it exists, because it's limited to reading files. Its name is `frame-judge:frame-critic` when the skill came in as a Claude Code plugin, and `frame_critic` in Codex. Otherwise use a general-purpose subagent with the same message.
-- **Claude Code enforces code-blindness.** The plugin's hook blocks the `frame-critic` agent from reading anything outside a `.frame-judge/round-N/bundle/` folder. For the strongest isolation, run `node <skill>/scripts/critic-sandbox.mjs` instead of spawning a subagent: it runs the critic as a separate headless process on a private copy of the bundle, with only the Read tool, and gates the review itself. Codex and Antigravity have no per-agent file sandbox, so there it rests on the critic's instructions; say so in your report.
+- **Claude Code: run the sandbox if you can.** If the `claude` CLI is on PATH, run `node <skill>/scripts/critic-sandbox.mjs` instead of spawning a subagent. It runs the critic as a separate headless process on a private copy of the bundle. That process has only the Read tool, plus a hook that blocks any read outside the copy, and the script gates the review itself (skip step 7). This is the only path where code-blindness is enforced rather than requested.
+- **Everywhere else:** use the in-session subagent, and code-blindness rests on the critic's instructions. On Claude Code, the transcript audit in step 7 still catches a critic that peeked. In Codex, Antigravity and Cursor nothing checks it, so say so in your report.
 
 Save the reply, untouched, to `.frame-judge/round-N/review.json`.
 
@@ -248,7 +249,7 @@ Use the first option that works, and tell the user which one you used:
 | [references/craft.md](references/craft.md) | Before building (the section for your medium) |
 | [references/capture.md](references/capture.md) | Capture setup, states files, frame-exact animation, HTML to video, ffmpeg recipes |
 | [references/platforms.md](references/platforms.md) | Spawning the critic, the model question and fallbacks, per platform |
-| `scripts/critic-sandbox.mjs`, `scripts/critic-guard.mjs`, `hooks/` | Claude Code isolation: the sandboxed critic runner, and the hook that blocks reads outside the bundle |
+| `scripts/critic-sandbox.mjs`, `scripts/critic-guard.mjs` | Claude Code isolation: the sandboxed critic runner, and the guard it pins to the critic process |
 | [references/scout-brief.md](references/scout-brief.md) | The slop scout's instructions (unslop mode). The scout reads them itself. |
 | [references/critic-brief.md](references/critic-brief.md) | Copied into every bundle as `CRITIC.md`. Don't edit it to go easier on yourself; the gate checks it. |
 | `references/rubric-*.md` | What the critic scores. Copied into bundles automatically. |

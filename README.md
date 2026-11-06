@@ -27,6 +27,21 @@ That's from a real test. The request was a dark landing page with no gradients a
 
 Each finding behind that verdict pointed at specific frames, and a script checked every one before it counted.
 
+## Run it
+
+frame-judge only runs when you call it. It stays out of your normal chats: the only thing it costs there is a one-paragraph description (about 100 tokens) telling your AI not to use it unless asked. Its instructions, scripts and critic load only on command. Type the command, then what you want built or fixed:
+
+| App | Command |
+|---|---|
+| Claude Code (terminal, Claude desktop app, IDE) | `/frame-judge` (`/frame-judge:frame-judge` if installed as a plugin) |
+| Codex (CLI, IDE, Codex app) | `$frame-judge` |
+| ChatGPT app | `@frame-judge` |
+| Cursor | `/frame-judge` |
+| Antigravity | `/frame-judge` |
+| Anything else | "use frame-judge" |
+
+Example: `/frame-judge make me a dark landing page with a walking robot mascot`
+
 ## What changes for you
 
 - **The model question:** your AI asks once which model the critic should use, on agents that support it (Claude Code, Codex). Cheaper or sharper, your call.
@@ -59,11 +74,12 @@ On Windows PowerShell, use `$HOME\...` instead of `~/...`.
 | Claude Code | `~/.claude/skills/frame-judge` | `agents/claude-code/frame-critic.md` | `~/.claude/agents/` |
 | Codex | `~/.agents/skills/frame-judge` | `agents/codex/frame-critic.toml` | `~/.codex/agents/` |
 | Antigravity | `~/.gemini/config/skills/frame-judge` | `agents/antigravity/frame-critic.md` | `~/.gemini/config/agents/` |
+| Cursor | `~/.cursor/skills/frame-judge` (skip it if the skill is already in `~/.claude/skills` or `~/.agents/skills`, since Cursor reads those too) | none needed | |
 | Anything else | your skills folder | the closest match, if you support custom subagents | your agents folder |
 
 **2. Copy the critic file** for your agent into its agents folder. Create the folder if it doesn't exist.
 
-**3. Claude Code: prefer the plugin.** It brings the skill, the critic, and a hook that blocks the critic from reading anything outside its review folder: `claude plugin marketplace add mirac221/frame-judge`, then `claude plugin install frame-judge@frame-judge`.
+**3. Claude Code, optional:** install it as a plugin instead, which brings the skill and the critic in one go: `claude plugin marketplace add mirac221/frame-judge`, then `claude plugin install frame-judge@frame-judge`.
 
 **4. Check the requirements:** run `node --version` (needs 18+) and `ffmpeg -version`. If either is missing, tell the user how to get it. Don't install system software without asking.
 
@@ -114,7 +130,7 @@ Copy-Item "$HOME\.claude\skills\frame-judge\agents\claude-code\frame-critic.md" 
 | Problem | What frame-judge does |
 |---|---|
 | The builder grades its own work | The critic never gets the code, the builder's reasoning, or its "I fixed it" claims. A script checks the critic's instructions weren't edited to go easy. |
-| The critic peeks at the code anyway | On Claude Code this is enforced, not just asked for. A hook blocks the critic from reading anything outside its review folder, and the gate audits its transcript and throws out any review that touched other files. For the strongest setup, a sandbox script runs the critic as a separate process on a private copy of the folder. Codex and Antigravity have no per-agent file sandbox, so there it's instruction-only. |
+| The critic peeks at the code anyway | With the Claude Code CLI installed, the critic runs as a separate, locked-down process on a private copy of the review folder. A hook blocks any read outside that copy, so it's enforced, not just asked for. In-session critics on Claude Code are audited instead: any review whose transcript shows it touched other files is thrown out. Codex, Antigravity and Cursor have no per-agent file sandbox, so there it's instruction-only. |
 | The critic only criticizes | Every criticism needs evidence. A pass is a legitimate verdict, and the critic must name what works so fixes don't break it. |
 | "Good" is subjective | Written rubrics for websites, motion and video, with 1–5 scores and named red flags: foot sliding, linear easing, AI-template tells, and more. |
 | The critic makes things up | A finding has to cite a frame it actually opened, or quote your request word for word. Otherwise it's thrown out. Unsure findings get a closer capture, not a blind fix. |
@@ -143,10 +159,9 @@ scripts/
   capture-page.mjs       screenshots per device and state, frame-exact animation to MP4
   video-frames.mjs       contact sheets, filmstrips, motion trails, jump/stall detection, black/frozen-frame checks
   judge.mjs              locks the request, builds the review packet, checks the verdict and the critic's transcript
-  critic-guard.mjs       hook that blocks the critic from reading outside its review folder
+  critic-guard.mjs       blocks the sandboxed critic from reading outside its review folder
   critic-sandbox.mjs     runs the critic as a separate, locked-down Claude Code process
-agents/                  the critic for Claude Code, Codex and Antigravity
-hooks/                   the Claude Code plugin hook that runs critic-guard
+agents/                  the critic for Claude Code, Codex and Antigravity, plus Codex's command-only setting
 .claude-plugin/          Claude Code plugin files
 ```
 
