@@ -4,7 +4,7 @@ description: Build frontends, UI animations, motion graphics and videos, then pr
 license: Apache-2.0
 compatibility: Node 18+, ffmpeg and ffprobe on PATH, and Playwright (or playwright-core plus an installed Chrome/Edge) for page capture. Native critic subagents on Claude Code, Codex and Antigravity; other agents fall back to a headless, human-relayed or clearly labeled self review.
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # frame-judge
@@ -22,6 +22,7 @@ Why: the model that wrote the code reads its intent into the output. It "sees" t
 | Step | What | Who |
 |---|---|---|
 | 0 | Lock the user's request, verbatim | you |
+| 0b | Ask "unsloppy?". If yes, a scout researches the AI defaults to avoid | you, the user, a scout |
 | 1 | Build | you |
 | 2 | Render and capture: screenshots, frame sheets, motion trails | scripts |
 | 3 | Mechanical self-check: it renders, nothing blank, no runtime errors | you |
@@ -49,7 +50,30 @@ Use `--brief "..."` for inline text, or `--brief-file -` to read stdin.
 
 This creates `.frame-judge/` (it git-ignores itself) with `brief.md` and `ledger.json`. The ledger survives context compaction. If you lose track, run `judge.mjs status`.
 
+## 0b. Ask about unslop mode (before building)
+
+Ask the user once, in these words:
+
+> Do you want it unsloppy? (experimental: may decrease quality and will spend more tokens)
+
+On Claude Code, ask with AskUserQuestion, in the same prompt as the critic-model question from step 5. Elsewhere, ask in chat. Skip it if the user already said.
+
+- **No:** carry on. Unslop is off by default.
+- **Yes:**
+  1. Run `judge.mjs set unslop on`, then `judge.mjs scout`. It prints a message for a **slop scout**: a fresh subagent with web search that finds out how AIs typically get this kind of request wrong.
+  2. Send the scout that message and nothing else. The same rules as for the critic apply: fresh agent, no fork, nothing added. Use the critic's model if one is set.
+  3. Save its reply, then run `judge.mjs avoid --file <reply>`. That rejects lists without real sources.
+- **No web search available:** tell the user unslop can't run here, and continue without it.
+
+The avoid list lands in `.frame-judge/avoid.md`, and it's included in every review bundle, so the critic checks the work against it too.
+
+"Experimental" because steering away from defaults can push a build toward odd choices, and the scout costs an extra agent run with web searches.
+
 ## 1. Build
+
+If unslop is on, read `.frame-judge/avoid.md` first.
+- Design around each pattern. Don't just invert it: the goal is work that fits the brief, not work that's merely different.
+- Anything the user explicitly asked for beats the list.
 
 Before building, read the section of [references/craft.md](references/craft.md) for your medium, once per session. It covers what critics flag most: spacing, type, AI-template tells, easing, walk cycles, video pacing.
 
@@ -121,7 +145,7 @@ Ask only if your platform lets you pick a subagent's model, and only once, befor
 
 | Platform | Ask? | How |
 |---|---|---|
-| Claude Code, Claude apps | Yes | AskUserQuestion: Sonnet (balanced, recommended), Opus (sharpest eye, most quota), Haiku (cheapest, misses subtle issues), Same as me |
+| Claude Code, Claude apps | Yes | AskUserQuestion, in the same prompt as the unslop question: Sonnet (balanced, recommended), Opus (sharpest eye, most quota), Haiku (cheapest, misses subtle issues), Same as me |
 | Codex app, Codex CLI | Yes | Ask in chat, then pass the choice when you spawn the critic |
 | Antigravity | No | There's no per-spawn model choice. The critic runs on its agent file's setting; tell the user that. |
 | Anything else | No | Unless it clearly supports per-subagent models. Use the default and tell the user which model reviewed the work. |
@@ -225,6 +249,7 @@ Use the first option that works, and tell the user which one you used:
 | [references/capture.md](references/capture.md) | Capture setup, states files, frame-exact animation, HTML to video, ffmpeg recipes |
 | [references/platforms.md](references/platforms.md) | Spawning the critic, the model question and fallbacks, per platform |
 | `scripts/critic-sandbox.mjs`, `scripts/critic-guard.mjs`, `hooks/` | Claude Code isolation: the sandboxed critic runner, and the hook that blocks reads outside the bundle |
+| [references/scout-brief.md](references/scout-brief.md) | The slop scout's instructions (unslop mode). The scout reads them itself. |
 | [references/critic-brief.md](references/critic-brief.md) | Copied into every bundle as `CRITIC.md`. Don't edit it to go easier on yourself; the gate checks it. |
 | `references/rubric-*.md` | What the critic scores. Copied into bundles automatically. |
 | [references/review.schema.json](references/review.schema.json) | The critic's output format, usable with `--json-schema` / `--output-schema` |

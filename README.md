@@ -30,6 +30,7 @@ Each finding behind that verdict pointed at specific frames, and a script checke
 ## What changes for you
 
 - **The model question:** your AI asks once which model the critic should use, on agents that support it (Claude Code, Codex). Cheaper or sharper, your call.
+- **"Do you want it unsloppy?"** (experimental): before building, your AI asks whether to run unslop mode. If you say yes, a scout agent searches the web for how AIs usually get your kind of request wrong. The builder designs around that list, and the critic checks against it. It costs more tokens and can push the design toward odd choices, which is why it's opt-in.
 - **Everything gets checked:** phone, tablet and desktop; hover and error states; the whole animation as timestamped frame strips. Strips are sampled (12 fps by default), with every frame shown around any sudden jump or stall it detects.
 - **A verdict, not "looks great!":** you get the critic's verdict, what got fixed, and what's still open.
 - **No endless loops:** at most 3 review rounds.
@@ -130,6 +131,7 @@ Copy-Item "$HOME\.claude\skills\frame-judge\agents\claude-code\frame-critic.md" 
 SKILL.md                 the workflow your AI follows
 references/
   critic-brief.md        the critic's instructions, copied into every review
+  scout-brief.md         the slop scout's instructions (unslop mode)
   rubric-frontend.md     layout, type, colour, responsive, states, AI-template tells
   rubric-motion.md       timing, easing, arcs, continuity, weight, walk cycles
   rubric-video.md        structure, pacing, composition, transitions, delivery

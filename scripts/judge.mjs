@@ -7,9 +7,11 @@ import { fileURLToPath } from 'node:url';
 const HELP = `judge.mjs <command> [options]   (state lives in ./.frame-judge, or --dir / FRAME_JUDGE_DIR)
 
   init     --brief "..." | --brief-file <file|->  [--kind frontend,motion,video] [--ref image]...
-           [--max-rounds 3] [--min-confidence 0.6] [--critic-model alias] [--force]
+           [--max-rounds 3] [--min-confidence 0.6] [--critic-model alias] [--unslop] [--force]
   brief    [--add "the user's exact words"]
-  set      critic-model | max-rounds | min-confidence | kind  <value>
+  set      critic-model | max-rounds | min-confidence | kind | unslop  <value>
+  scout    print the message for the slop scout (unslop mode)
+  avoid    --file <scout reply|->   check and save the scout's avoid list
   bundle   <capture dir|file>... [--include-video] [--force]
   gate     --review <file|->  [--reviewer subagent|headless|human|self] [--model name]
            [--transcript auto|<file.jsonl>]   verify coverage and code-blindness from the critic's real tool calls
@@ -31,7 +33,7 @@ const REGATE = new Set(['RERUN_CRITIC', 'STOP_CRITIC_UNRELIABLE']);
 const BUCKET_RANK = { must_fix: 0, verify: 1, polish: 2, ignored: 3 };
 const WARN_IMAGES = 20;
 const MAX_IMAGES = 40;
-const BOOLEAN_FLAGS = new Set(['force', 'include-video', 'json', 'help']);
+const BOOLEAN_FLAGS = new Set(['force', 'include-video', 'json', 'help', 'unslop']);
 
 const die = (msg, code = 1) => { console.error(`frame-judge: ${msg}`); process.exit(code); };
 const readText = (p) => fs.readFileSync(p, 'utf8').replace(/^﻿/, '');
@@ -187,6 +189,7 @@ function cmdInit(args) {
     max_rounds: maxRounds,
     min_confidence: minConf,
     critic_model: args['critic-model'] ? String(one(args['critic-model'])) : null,
+    unslop: Boolean(args.unslop),
     refs,
     brief_sha256: sha256(briefMd),
     rounds: [],
@@ -197,7 +200,46 @@ function cmdInit(args) {
   console.log(`  brief: ${trunc(brief, 100)}`);
   console.log(`  kinds: ${kinds.length ? kinds.join(', ') : 'auto (from captures)'} · max rounds: ${maxRounds} · critic model: ${ledger.critic_model || 'not chosen yet: ask the user before round 1'}`);
   if (refs.length) console.log(`  reference images: ${refs.length}`);
+  if (ledger.unslop) console.log('  unslop: ON. Next run "judge.mjs scout" and send the slop scout out BEFORE you build.');
   console.log('next: build, capture (capture-page.mjs / video-frames.mjs), then "judge.mjs bundle <capture dirs>"');
+}
+
+function cmdScout(args) {
+  const dir = stateDir(args);
+  const ledger = loadLedger(dir);
+  if (!ledger.unslop) die('unslop mode is off. If the user wants it: judge.mjs set unslop on');
+  const message = `You are the slop scout. Read ${path.join(REFS, 'scout-brief.md')} and follow it exactly. The user's request is in ${path.join(dir, 'brief.md')}. Search the web, open nothing else on this machine, write no files, and reply with the avoid list only.`;
+  fs.writeFileSync(path.join(dir, 'scout.txt'), message + '\n');
+  console.log('Spawn a FRESH scout subagent that can search the web (no fork, nothing else added), with exactly this message:\n');
+  console.log(message);
+  console.log(`\nSave its reply to a file, then: judge.mjs avoid --file <that file>`);
+}
+
+function cmdAvoid(args) {
+  const dir = stateDir(args);
+  const ledger = loadLedger(dir);
+  const src = one(args.file);
+  if (!src || src === true) die('usage: judge.mjs avoid --file <scout reply|->');
+  let text = src === '-' ? readStdin() : readText(path.resolve(String(src)));
+  const fenced = text.match(/```(?:markdown|md)?\s*\n([\s\S]*?)\n```/);
+  if (fenced && !/^#\s+Avoid list/m.test(text.split('```')[0])) text = fenced[1];
+  const start = text.search(/^#\s+Avoid list/m);
+  if (start < 0) die('no "# Avoid list" heading in the reply. Run the scout again.');
+  text = text.slice(start).trim() + '\n';
+  const patterns = [...text.matchAll(/^##\s+\d+\.\s+(.+)$/gm)].map((m) => m[1].trim());
+  const urls = new Set(text.match(/https?:\/\/[^\s)>\]]+/g) || []);
+  const problems = [];
+  if (patterns.length < 3) problems.push(`only ${patterns.length} pattern(s); expected 5 to 10`);
+  if (urls.size < 2) problems.push(`only ${urls.size} source URL(s); the list has to be researched, not made up`);
+  const withoutInstead = text.split(/^##\s+\d+\.\s+/m).slice(1).filter((s) => !/\*\*Instead:\*\*/.test(s.split(/^##\s/m)[0])).length;
+  if (withoutInstead) problems.push(`${withoutInstead} pattern(s) without an "Instead"`);
+  if (problems.length) die(`the avoid list isn't usable: ${problems.join('; ')}. Run the scout again.`);
+  fs.writeFileSync(path.join(dir, 'avoid.md'), text);
+  ledger.avoid = { patterns: patterns.length, sources: urls.size, sha256: sha256(text), saved_at: now() };
+  saveLedger(dir, ledger);
+  console.log(`frame-judge: saved avoid list with ${patterns.length} patterns from ${urls.size} sources`);
+  for (const p of patterns) console.log(`  - ${p}`);
+  console.log('Read .frame-judge/avoid.md before you build, and design around it. It goes to the critic too.');
 }
 
 function cmdBrief(args) {
@@ -218,8 +260,12 @@ function cmdSet(args) {
   const dir = stateDir(args);
   const ledger = loadLedger(dir);
   const [key, value] = args._;
-  if (!key || value === undefined) die('usage: judge.mjs set critic-model|max-rounds|min-confidence|kind <value>');
+  if (!key || value === undefined) die('usage: judge.mjs set critic-model|max-rounds|min-confidence|kind|unslop <value>');
   if (key === 'critic-model') ledger.critic_model = String(value);
+  else if (key === 'unslop') {
+    if (!/^(on|off|true|false|yes|no)$/i.test(value)) die('unslop must be on or off');
+    ledger.unslop = /^(on|true|yes)$/i.test(value);
+  }
   else if (key === 'max-rounds') {
     const n = parseInt(value, 10);
     if (!(n >= 1)) die('max-rounds must be 1 or more');
@@ -355,6 +401,9 @@ function cmdBundle(args) {
   fs.writeFileSync(path.join(bundleDir, 'CRITIC.md'), critic);
   fs.writeFileSync(path.join(bundleDir, 'rubric.md'), rubric);
   fs.writeFileSync(path.join(bundleDir, 'brief.md'), brief);
+  const avoidPath = path.join(dir, 'avoid.md');
+  const avoid = ledger.unslop && exists(avoidPath) ? readText(avoidPath) : null;
+  if (avoid) fs.writeFileSync(path.join(bundleDir, 'avoid.md'), avoid);
 
   let prior = null;
   if (round > 1) {
@@ -391,6 +440,7 @@ function cmdBundle(args) {
     critic_sha256: sha256(critic),
     rubric_sha256: sha256(rubric),
     brief_sha256: sha256(brief),
+    avoid_sha256: avoid ? sha256(avoid) : null,
     kinds,
   });
 
@@ -399,6 +449,7 @@ function cmdBundle(args) {
   packet += textSection('CRITIC.md', critic);
   packet += textSection('brief.md', brief);
   packet += textSection('rubric.md', rubric);
+  if (avoid) packet += textSection('avoid.md', avoid);
   packet += textSection('manifest.json', JSON.stringify(manifest, null, 2));
   if (prior) packet += textSection('prior.json', JSON.stringify(prior, null, 2));
   fs.writeFileSync(path.join(bundleDir, 'packet.md'), packet);
@@ -417,6 +468,7 @@ function cmdBundle(args) {
   if (skipped.length) console.log(`  skipped ${skipped.length} non-visual or missing file(s): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}`);
   if (imageCount > WARN_IMAGES) console.log(`  warning: ${imageCount} images. Past ~20 per request, Claude tightens image limits and cost climbs. Prefer sheets, fewer slices, tighter crops.`);
   console.log(`  critic model: ${ledger.critic_model || 'NOT CHOSEN. Ask the user once, then: judge.mjs set critic-model <alias>'}`);
+  if (ledger.unslop) console.log(avoid ? `  unslop: avoid list included (${ledger.avoid ? ledger.avoid.patterns : '?'} patterns)` : '  warning: unslop is on but there is no avoid list yet. Run "judge.mjs scout" first.');
   console.log('\nSpawn a FRESH critic (no fork, no extra context) with exactly this message:\n');
   console.log(spawn);
   console.log(`\nSave its reply to ${rel(path.join(roundDir, 'review.json'))}, then: judge.mjs gate --review ${rel(path.join(roundDir, 'review.json'))} --reviewer subagent`);
@@ -515,6 +567,7 @@ function cmdGate(args) {
   const tampered = [];
   if (sha256(criticNow) !== lock.critic_sha256 || sha256(criticNow) !== sha256(skillCritic)) tampered.push('CRITIC.md');
   if (sha256(rubricNow) !== lock.rubric_sha256 || sha256(rubricNow) !== sha256(skillRubric)) tampered.push('rubric.md');
+  if (lock.avoid_sha256 && (!exists(path.join(bundleDir, 'avoid.md')) || sha256(readText(path.join(bundleDir, 'avoid.md'))) !== lock.avoid_sha256)) tampered.push('avoid.md');
   if (tampered.length) die(`${tampered.join(' and ')} in the bundle ${tampered.length > 1 ? 'were' : 'was'} edited after bundling, so the critic may have been softened. Re-run "judge.mjs bundle" and a fresh critic.`, 2);
 
   const reviewer = String(one(args.reviewer) || 'subagent');
@@ -897,7 +950,7 @@ function cmdStatus(args) {
   const gated = ledger.rounds.filter((r) => r.gated_at && r.counts);
   const last = gated[gated.length - 1];
   const pending = lastRound(ledger);
-  L(`frame-judge status · ${ledger.rounds.length} round(s) of max ${ledger.max_rounds} · critic model: ${ledger.critic_model || 'not chosen'}`);
+  L(`frame-judge status · ${ledger.rounds.length} round(s) of max ${ledger.max_rounds} · critic model: ${ledger.critic_model || 'not chosen'} · unslop: ${ledger.unslop ? (ledger.avoid ? `on (${ledger.avoid.patterns} patterns avoided)` : 'on, no avoid list yet') : 'off'}`);
   for (const r of ledger.rounds) {
     L(`  round ${r.round}: ${r.decision || (r.gated_at ? 'gated' : 'awaiting review')}${r.reviewer ? ` · ${r.reviewer}${r.model ? `/${r.model}` : ''}` : ''}${r.counts ? ` · must-fix ${r.counts.must_fix}, verify ${r.counts.verify}, polish ${r.counts.polish}, rejected ${r.counts.rejected}, resolved ${r.counts.resolved}` : ''}`);
   }
@@ -927,7 +980,7 @@ function cmdStatus(args) {
 
 const [cmd, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
-const commands = { init: cmdInit, brief: cmdBrief, set: cmdSet, bundle: cmdBundle, gate: cmdGate, respond: cmdRespond, status: cmdStatus };
+const commands = { init: cmdInit, brief: cmdBrief, set: cmdSet, scout: cmdScout, avoid: cmdAvoid, bundle: cmdBundle, gate: cmdGate, respond: cmdRespond, status: cmdStatus };
 if (!cmd || cmd === 'help' || cmd === '--help' || !commands[cmd]) {
   console.log(HELP);
   process.exit(cmd && cmd !== 'help' && cmd !== '--help' ? 1 : 0);

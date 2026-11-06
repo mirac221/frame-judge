@@ -7,6 +7,15 @@ Every platform has the same three non-negotiables:
 - **The spawn message `bundle` printed, and nothing else.**
 - **Ask about the model once, and only where the platform lets you choose it** (Claude Code and the Claude apps, Codex app and CLI). Record the answer with `judge.mjs set critic-model …` and reuse it.
 
+## The slop scout (unslop mode)
+
+The scout needs web search.
+- **Claude Code:** a general-purpose subagent has WebSearch and WebFetch. Don't use the `frame-critic` agent; it can only read files.
+- **Codex:** web search has to be enabled in the user's Codex setup.
+- **Antigravity:** the agent can search and browse.
+
+If the platform has no web access at all, tell the user unslop mode can't run, and build without it. Never write an avoid list from memory: `judge.mjs avoid` rejects lists without real sources, for that reason.
+
 ## Claude Code
 
 **Install**

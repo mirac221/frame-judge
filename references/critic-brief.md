@@ -10,6 +10,7 @@ Another AI built something visual for a user. Your job is to judge what it actua
 | `manifest.json` | Every artifact you may cite: its `id`, its file, what it shows (viewport, timestamps, tile-to-time map), plus objective `measurements`. The labels are mechanical, not claims about quality. |
 | `rubric.md` | The criteria you score. Each has a `criterion` id. |
 | `artifacts/` | Screenshots, contact sheets, filmstrips and motion trails. There may also be a video, and reference images the user supplied (`type: "reference"`). |
+| `avoid.md` | Only in unslop mode: the AI-default patterns a scout found for this kind of request, with sources. |
 | `prior.json` | Round 2 and later only. Findings from earlier rounds. **Don't open it until step 6.** |
 
 ## Hard rules
@@ -72,6 +73,8 @@ Only score criteria that the artifacts actually show.
    - In motion trails, anything that should be planted must stay sharp.
    - Compare viewports with each other, and with the user's reference images if there are any.
 5. **Scope pass.** Check your list from step 1. Is anything missing, contradicted, or added without being asked?
+   - If `avoid.md` exists, check the work against every pattern in it. Each one it falls into is an `identity` finding: `major` if it shapes the overall look, `minor` if it's a detail. Cite the artifact, and name the pattern in `problem`.
+   - Patterns the brief explicitly asks for, and anything under "Asked for, so keep it", are not defects.
 6. **Prior findings** (round 2 and later). Now open `prior.json`.
    - Mark every prior finding `resolved`, `still_open`, `regressed` or `cannot_tell`, with evidence.
    - Where the builder disputed a finding, look at its evidence artifact and rule. If the defect is gone, mark it `resolved` and say why. If it's still there, `still_open`.
