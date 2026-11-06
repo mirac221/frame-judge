@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "frame-judge critic review",
+  "description": "What the frame critic returns. Every object lists all of its keys as required (nullable where optional) so the schema also works with strict structured-output modes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["round", "verdict", "gut_reaction", "summary", "opened", "scores", "findings", "keep", "prior", "requests"],
+  "properties": {
+    "round": { "type": "integer" },
+    "verdict": { "type": "string", "enum": ["pass", "revise", "rethink"] },
+    "gut_reaction": { "type": "string", "description": "One blunt sentence: the honest first impression." },
+    "summary": { "type": "string" },
+    "opened": { "type": "array", "items": { "type": "string" }, "description": "Every artifact id the critic actually opened." },
+    "scores": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion", "score"],
+        "properties": {
+          "criterion": { "type": "string" },
+          "score": { "type": "integer", "enum": [1, 2, 3, 4, 5] }
+        }
+      }
+    },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "keep": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["what", "evidence"],
+        "properties": {
+          "what": { "type": "string" },
+          "evidence": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    },
+    "prior": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "evidence", "note"],
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "type": "string", "enum": ["resolved", "still_open", "regressed", "cannot_tell"] },
+          "evidence": { "$ref": "#/$defs/evidence" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["need", "why", "for"],
+        "properties": {
+          "need": { "type": "string" },
+          "why": { "type": "string" },
+          "for": { "type": ["string", "null"] }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifact", "at"],
+        "properties": {
+          "artifact": { "type": "string", "description": "An artifact id from manifest.json that was opened, or \"measurements\"." },
+          "at": { "type": "string", "description": "Tile, timestamp or region, in plain words." }
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "criterion", "severity", "confidence", "evidence", "observation", "problem", "fix", "brief_quote", "matches_prior"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string", "enum": ["quality", "missing", "contradicts", "unrequested"] },
+        "criterion": { "type": "string" },
+        "severity": { "type": "string", "enum": ["blocker", "major", "minor", "nit"] },
+        "confidence": { "type": "number", "description": "0 to 1: how sure the defect exists as described at this resolution." },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "observation": { "type": "string", "description": "Literally what is visible." },
+        "problem": { "type": "string", "description": "Why that is wrong." },
+        "fix": { "type": "string", "description": "What it should look like instead, in visual terms." },
+        "brief_quote": { "type": ["string", "null"], "description": "Verbatim from brief.md; required for missing and contradicts." },
+        "matches_prior": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "frame-judge",
+  "description": "frame-judge: AI agents prove their visual work to a code-blind critic instead of calling it great.",
+  "owner": { "name": "mirac221", "url": "https://github.com/mirac221" },
+  "plugins": [
+    {
+      "name": "frame-judge",
+      "source": "./",
+      "description": "Code-blind critic loop for frontends, UI animation, motion graphics and video."
+    }
+  ]
+}
