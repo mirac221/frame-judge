@@ -120,7 +120,8 @@ const contextFor = (vp, o) => ({
 
 function describe(vp, o) {
   const dpr = o.dpr || vp.dpr;
-  let s = `${vp.name} ${vp.width}×${vp.height}${dpr > 1 ? ` @${dpr}x` : ''}`;
+  const size = `${vp.width}×${vp.height}`;
+  let s = `${vp.name === `${vp.width}x${vp.height}` ? size : `${vp.name} ${size}`}${dpr > 1 ? ` @${dpr}x` : ''}`;
   if (o.colorScheme !== 'light') s += `, ${o.colorScheme} colour scheme`;
   if (o.reducedMotion === 'reduce') s += ', reduced motion';
   return s;
