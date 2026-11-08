@@ -202,6 +202,8 @@ agents/                  the critic for Claude Code, Cursor, Codex and Antigravi
 
 </details>
 
+**Also by me:** [assumption-judge](https://github.com/mirac221/assumption-judge), an independent judge that fact-checks every reply your AI agent writes and interrupts only on a hallucination.
+
 ## License
 
 [Apache-2.0](LICENSE) © 2026 mirac221. Use it, change it, ship it. When you share it, keep the [LICENSE](LICENSE) and [NOTICE](NOTICE) files so the credit stays with the original work.
