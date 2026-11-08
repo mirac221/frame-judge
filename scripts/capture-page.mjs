@@ -17,6 +17,9 @@ Screenshots
   --live-animations                   keep CSS animations running in screenshots
   --dpr N                             device pixel ratio for every viewport
   --channel chrome|msedge             use an installed browser instead of Playwright's
+  --cdp                               skip Playwright: drive an installed Chrome/Edge/Chromium over DevTools
+                                      (automatic when Playwright isn't installed; needs Node 22+)
+  --browser <path>                    which browser --cdp uses (default: the first one found)
 
 Animation (first viewport only)
   --animate <ms> --fps 30             frame-exact capture, encoded to <out>/animation.mp4
@@ -30,7 +33,7 @@ const PRESETS = {
   tablet: { width: 768, height: 1024, dpr: 1, mobile: false, touch: true },
   mobile: { width: 390, height: 844, dpr: 2, mobile: true, touch: true },
 };
-const BOOLEAN_FLAGS = new Set(['dark', 'reduced-motion', 'live-animations', 'no-clock', 'help']);
+const BOOLEAN_FLAGS = new Set(['dark', 'reduced-motion', 'live-animations', 'no-clock', 'help', 'cdp']);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const die = (msg) => { console.error(`capture-page: ${msg}`); process.exit(1); };
@@ -359,8 +362,20 @@ if (args.actions) {
 }
 fs.mkdirSync(o.out, { recursive: true });
 
-const pw = loadPlaywright();
-if (!pw) die('Playwright not found. Install it in your project (npm i -D playwright, then npx playwright install chromium), or use npm i -D playwright-core with --channel chrome / msedge. FRAME_JUDGE_PLAYWRIGHT=/path/to/playwright also works.');
+let pw = args.cdp ? null : loadPlaywright();
+if (!pw) {
+  // No Playwright: drive an installed Chrome / Edge / Chromium / Brave over DevTools instead (scripts/cdp.mjs).
+  const cdp = await import(pathToFileURL(path.join(SCRIPT_DIR, 'cdp.mjs')).href);
+  const exe = cdp.findBrowser(args.browser ? String(one(args.browser)) : null);
+  if (exe && typeof WebSocket === 'function') {
+    pw = cdp.playwrightLike(exe);
+    console.log(`capture-page: ${args.cdp ? '--cdp' : 'Playwright not found'}, so using your installed browser over DevTools: ${exe}`);
+  } else {
+    die(exe
+      ? `Playwright not found, and capturing with your installed browser needs Node 22+ (this is ${process.versions.node}). Upgrade Node, or install Playwright: npm i -D playwright && npx playwright install chromium`
+      : 'no browser to capture with. Install Chrome, Edge or Chromium (or pass --browser /path/to/chrome), or install Playwright: npm i -D playwright && npx playwright install chromium');
+  }
+}
 
 const cap = {
   tool: 'capture-page',

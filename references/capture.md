@@ -1,10 +1,14 @@
 # Capture: getting pixels the critic can judge
 
+## No Playwright? Use the browser you have
+
+`capture-page.mjs` needs no install when Playwright is missing. With Node 22+, it drives the Chrome, Edge, Chromium or Brave already on the machine over the DevTools protocol (`scripts/cdp.mjs`): viewports, device pixel ratio, mobile and touch emulation, color scheme, reduced motion, the actions file, element crops, console and network errors, and frame-exact animation with a fake clock. `--cdp` forces it even when Playwright is installed, `--browser <path>` picks the browser, and `FRAME_JUDGE_BROWSER` sets a default. Tested on Windows 11 with Chrome. Playwright is still the better-tested path, and `--channel` only applies to it.
+
 ## Setup
 
 **ffmpeg and ffprobe** must be on PATH. They're used for every video view and for encoding animations.
 
-**Playwright** is only for `capture-page.mjs`. The script looks for `playwright`, `playwright-core` or `@playwright/test` in three places: the project you run it from, the skill folder, and the global npm root. To point at a specific install, set `FRAME_JUDGE_PLAYWRIGHT=/path/to/node_modules/playwright`. If none is installed, ask the user before adding a dependency. Either option works:
+**Playwright** is only for `capture-page.mjs`. The script looks for `playwright`, `playwright-core` or `@playwright/test` in three places: the project you run it from, the skill folder, and the global npm root. To point at a specific install, set `FRAME_JUDGE_PLAYWRIGHT=/path/to/node_modules/playwright`. If none is installed, first try the zero-install path above. Install Playwright only if that fails or the user wants it, and ask before adding a dependency. Either option works:
 - `npm i -D playwright`, then `npx playwright install chromium`.
 - `npm i -D playwright-core`, then pass `--channel chrome` or `--channel msedge` to use a browser that's already installed. Nothing extra gets downloaded.
 

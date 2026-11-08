@@ -4,7 +4,18 @@
 
 Your AI builds the work and renders it. Then a second AI, the critic, judges only what's actually on screen, against what you asked for. It never sees the code, and it never hears the builder's opinion. Every complaint has to point at a real frame. Nothing gets called done until the critic passes it.
 
-Works with **Claude Code**, **Codex**, **Antigravity**, and any AI agent that supports [Agent Skills](https://agentskills.io).
+![license](https://img.shields.io/badge/license-Apache--2.0-blue) ![agent skills](https://img.shields.io/badge/Agent%20Skills-compatible-6b4fbb) ![node](https://img.shields.io/badge/node-18%2B-339933) ![deps](https://img.shields.io/badge/npm%20dependencies-0-brightgreen)
+
+| Works in | Critic | Status |
+|---|---|---|
+| **Claude Code** (CLI, desktop app, VS Code / JetBrains) | A locked-down headless critic (reads outside its folder are blocked), or the `frame-critic` subagent with an audited transcript | Tested |
+| **Antigravity** (app, IDE, `agy` CLI) | A headless `agy` critic whose every file read is audited, or `invoke_subagent` | Tested |
+| **Cursor** (IDE and Cursor CLI) | A read-only `frame-critic` subagent | From the docs |
+| **Codex** (CLI, IDE, ChatGPT desktop app in Codex mode) | The `frame_critic` agent | From the docs |
+| **Claude Cowork**, **ChatGPT Work** | A fresh subagent | From the docs |
+| **claude.ai**, **ChatGPT** chat | Relay: upload the zip; the critic runs in a fresh chat | From the docs |
+
+No Playwright needed: page capture drives the Chrome, Edge or Chromium you already have.
 
 ## Install
 
@@ -12,7 +23,11 @@ Works with **Claude Code**, **Codex**, **Antigravity**, and any AI agent that su
 
 > Install this skill: https://github.com/mirac221/frame-judge
 
-That's it. Your AI reads the setup steps below and does the rest.
+That's it. Your AI reads the setup steps below and does the rest. Or do it yourself in one go: it installs into every agent app it finds on your machine.
+
+```bash
+git clone https://github.com/mirac221/frame-judge && node frame-judge/scripts/install.mjs
+```
 
 ## What the critic sees
 
@@ -27,6 +42,29 @@ That's from a real test. The request was a dark landing page with no gradients a
 
 Each finding behind that verdict pointed at specific frames, and a script checked every one before it counted.
 
+## What the critic checks now
+
+**Every ask, one by one.** AI builders rarely fail by building something ugly. They fail by quietly dropping part of what you asked for. So the critic has to quote every explicit ask in your request, word for word, and mark each one met, partial, missing or contradicted, pointing at the frame that shows it. A script checks every quote against your actual words. An unmet ask becomes a must-fix even if the critic forgot to file it, and a "pass" without this list is sent back.
+
+From a real run on a motion brief (Claude Haiku built it, a Sonnet critic judged it, 18 of 18 frames opened, verified from its transcript):
+
+```
+brief: 8/8 asks met
+  "staggered by 150ms"          met  strip-1-01: successive peaks about 165ms apart
+  "Each dot squashes when it lands."  met  dense-1-01: dot 3 flattening, tiles 1-3
+  "the dots must not bounce; they gently fade in and out instead"
+                                met  rm-strip-1-01: dots stay level and vary only in opacity
+```
+
+**Honest numbers from the November 2026 test.** Claude Haiku built three briefs: a landing page (8 asks), a settings page (8), and the motion brief above (8). A Sonnet critic judged each one, code-blind:
+- The critic opened every frame in all three reviews, and the gate verified that from its transcripts (5/5, 2/2, 18/18).
+- Haiku's first builds met 23 of the 24 asks. The one gap was a footer the capture had cut off, which is a capture problem, and the critic asked for that frame instead of guessing.
+- Haiku revising its own work from screenshots didn't break anything either: the critic passed the revised motion build 9/9.
+
+So on briefs this size, today's models mostly get it right, and frame-judge's job is to *prove* that with evidence, in about a minute, instead of you taking "looks great!" on faith. Where it earns its keep is where models still slip: long briefs, motion, and responsive details. The walking-robot test above is one of those.
+
+**Before and after.** From round 2 on, the critic gets the previous round's frames next to the new ones for every open problem, so "fixed" is checked by comparing, not by taking the builder's word for it.
+
 ## Run it
 
 frame-judge only runs when you call it. It stays out of your normal chats: the only thing it costs there is a one-paragraph description (about 100 tokens) telling your AI not to use it unless asked. Its instructions, scripts and critic load only on command. Type the command, then what you want built or fixed:
@@ -34,9 +72,9 @@ frame-judge only runs when you call it. It stays out of your normal chats: the o
 | App | Command |
 |---|---|
 | Claude Code (terminal, Claude desktop app, IDE) | `/frame-judge` (`/frame-judge:frame-judge` if installed as a plugin) |
-| Codex (CLI, IDE, Codex app) | `$frame-judge` |
-| ChatGPT app | `@frame-judge` |
-| Cursor | `/frame-judge` |
+| Codex (CLI, IDE, ChatGPT desktop app in Codex mode) | `$frame-judge` |
+| ChatGPT (Chat and Work) | `@frame-judge` |
+| Cursor (IDE and Cursor CLI) | `/frame-judge` |
 | Antigravity | `/frame-judge` |
 | Anything else | "use frame-judge" |
 
@@ -54,40 +92,34 @@ Example: `/frame-judge make me a dark landing page with a walking robot mascot`
 
 - Node.js 18 or newer
 - ffmpeg
-- For websites: Playwright (your AI will offer to set it up)
+- For websites: Chrome, Edge or Chromium with Node 22+ (nothing to install), or Playwright
+- `node scripts/judge.mjs doctor` tells you what's there
 - An AI model that can see images
 
 ## Setup steps (for the AI doing the install)
 
 You were sent this link to install frame-judge. Do this, then tell the user what you did.
 
-**1. Clone this repo into your skills folder as `frame-judge`.**
+**1. Clone this repo anywhere and run the installer.** It detects Claude Code, Codex (and the ChatGPT desktop app's Codex mode), Antigravity and Cursor on this machine, and copies the skill and the critic agent into each one's folders. It never overwrites a git clone or a different skill.
 
+```bash
+git clone https://github.com/mirac221/frame-judge
+node frame-judge/scripts/install.mjs --dry-run   # show what it would do
+node frame-judge/scripts/install.mjs             # do it
 ```
-git clone https://github.com/mirac221/frame-judge <skill folder>
-```
 
-On Windows PowerShell, use `$HOME\...` instead of `~/...`.
+- `--apps claude-code,codex,antigravity,cursor` picks apps instead of auto-detecting.
+- `--project <repo>` installs into one project instead of your user folders.
+- `--zip` builds `dist/frame-judge.zip` for **claude.ai** (Settings > Capabilities > code execution, then Skills > Upload) and **ChatGPT** (Skills > Create > Upload).
+- `--uninstall` removes what it installed.
 
-| Agent | Skill folder | Critic file | Copy the critic to |
-|---|---|---|---|
-| Claude Code | `~/.claude/skills/frame-judge` | `agents/claude-code/frame-critic.md` | `~/.claude/agents/` |
-| Codex | `~/.agents/skills/frame-judge` | `agents/codex/frame-critic.toml` | `~/.codex/agents/` |
-| Antigravity | `~/.gemini/config/skills/frame-judge` | `agents/antigravity/frame-critic.md` | `~/.gemini/config/agents/` |
-| Cursor | `~/.cursor/skills/frame-judge` (skip it if the skill is already in `~/.claude/skills` or `~/.agents/skills`, since Cursor reads those too) | none needed | |
-| Anything else | your skills folder | the closest match, if you support custom subagents | your agents folder |
+**2. Claude Code, optional:** install it as a plugin instead, which brings the skill and the critic in one go: `claude plugin marketplace add mirac221/frame-judge`, then `claude plugin install frame-judge@frame-judge`. Claude Cowork takes the same plugin.
 
-**2. Copy the critic file** for your agent into its agents folder. Create the folder if it doesn't exist.
+**3. Check the requirements:** `node frame-judge/scripts/judge.mjs doctor`. If ffmpeg or a browser is missing, tell the user how to get it. Don't install system software without asking.
 
-**3. Claude Code, optional:** install it as a plugin instead, which brings the skill and the critic in one go: `claude plugin marketplace add mirac221/frame-judge`, then `claude plugin install frame-judge@frame-judge`.
+**4. Reload:** in the Antigravity CLI, run `/skills reload`. Elsewhere, a new session picks the skill up.
 
-**4. Check the requirements:** run `node --version` (needs 18+) and `ffmpeg -version`. If either is missing, tell the user how to get it. Don't install system software without asking.
-
-**5. Reload:** in the Antigravity CLI, run `/skills reload`. Elsewhere, a new session picks the skill up.
-
-**One project only?** Use that project's `.claude/skills/` (Claude Code) or `.agents/skills/` (Codex, Antigravity). Put the critic in its `.claude/agents/`, `.codex/agents/` or `.agents/agents/`.
-
-**To update:** run `git -C <skill folder> pull`, then copy the critic file again.
+**To update:** `git -C frame-judge pull`, then run the installer again.
 
 <details>
 <summary>Prefer to install it yourself? Copy-paste commands</summary>
@@ -116,7 +148,7 @@ git clone https://github.com/mirac221/frame-judge ~/.gemini/config/skills/frame-
 mkdir -p ~/.gemini/config/agents && cp ~/.gemini/config/skills/frame-judge/agents/antigravity/frame-critic.md ~/.gemini/config/agents/
 ```
 
-**Windows PowerShell** (Claude Code shown; swap the folders from the table for other agents):
+**Windows PowerShell** (Claude Code shown; for other apps, `scripts/install.mjs` picks the right folders):
 ```powershell
 git clone https://github.com/mirac221/frame-judge "$HOME\.claude\skills\frame-judge"
 New-Item -ItemType Directory -Force "$HOME\.claude\agents" | Out-Null
@@ -130,13 +162,14 @@ Copy-Item "$HOME\.claude\skills\frame-judge\agents\claude-code\frame-critic.md" 
 | Problem | What frame-judge does |
 |---|---|
 | The builder grades its own work | The critic never gets the code, the builder's reasoning, or its "I fixed it" claims. A script checks the critic's instructions weren't edited to go easy. |
-| The critic peeks at the code anyway | With the Claude Code CLI installed, the critic runs as a separate, locked-down process on a private copy of the review folder. A hook blocks any read outside that copy, so it's enforced, not just asked for. In-session critics on Claude Code are audited instead: any review whose transcript shows it touched other files is thrown out. Codex, Antigravity and Cursor have no per-agent file sandbox, so there it's instruction-only. |
+| The critic peeks at the code anyway | With the Claude Code CLI installed, the critic runs as a separate, locked-down process on a private copy of the review folder. A hook blocks any read outside that copy, so it's enforced, not just asked for. With Antigravity's `agy` CLI, the critic runs the same way, and every file it opened is checked afterwards. In-session critics on Claude Code are audited too: any review whose transcript shows it touched other files is thrown out. Cursor and Codex subagents have no per-agent file sandbox, so there it's instruction-only (Cursor's critic is at least read-only). |
+| The critic skips half your request | It must list every explicit ask from your words, quoted verbatim, with a status and a frame. Made-up quotes are dropped; unmet asks become must-fix items; a pass without the list is sent back. |
 | The critic only criticizes | Every criticism needs evidence. A pass is a legitimate verdict, and the critic must name what works so fixes don't break it. |
 | "Good" is subjective | Written rubrics for websites, motion and video, with 1–5 scores and named red flags: foot sliding, linear easing, AI-template tells, and more. |
 | The critic makes things up | A finding has to cite a frame it actually opened, or quote your request word for word. Otherwise it's thrown out. Unsure findings get a closer capture, not a blind fix. |
 | The critic skims | A pass only counts if the critic opened every image. On Claude Code that's checked against the critic's actual file reads in its transcript, so claiming it looked doesn't work. Elsewhere it's the critic's own list. |
 | Short glitches hide between sampled frames | The video tool scans every source frame for sudden jumps and stalls and adds full-rate strips around them. `--motion-fps source` shows every frame everywhere. |
-| Builder and critic talk past each other | Findings have IDs. The builder answers each one: fixed, disputed (with screenshots, never code), or won't fix (quoting your request). |
+| Builder and critic talk past each other | Findings have IDs. The builder answers each one: fixed, disputed (with screenshots, never code), or won't fix (quoting your request). The next critic sees before and after frames side by side. |
 | It loops forever | At most 3 rounds, and it stops early if a round fixes nothing. |
 | Agents differ | It uses a real subagent where the agent has one, a separate CLI critic where it doesn't, or a clearly labeled self-review as a last resort. |
 
@@ -157,11 +190,13 @@ references/
   craft.md               how to build it well the first time
 scripts/
   capture-page.mjs       screenshots per device and state, frame-exact animation to MP4
+  cdp.mjs                drives your installed Chrome/Edge over DevTools when Playwright isn't installed
+  install.mjs            installs into every agent app on the machine; --zip for claude.ai and ChatGPT
   video-frames.mjs       contact sheets, filmstrips, motion trails, jump/stall detection, black/frozen-frame checks
-  judge.mjs              locks the request, builds the review packet, checks the verdict and the critic's transcript
+  judge.mjs              doctor, locks the request, builds the review packet, checks the verdict, every ask, and the critic's transcript
   critic-guard.mjs       blocks the sandboxed critic from reading outside its review folder
-  critic-sandbox.mjs     runs the critic as a separate, locked-down Claude Code process
-agents/                  the critic for Claude Code, Codex and Antigravity, plus Codex's command-only setting
+  critic-sandbox.mjs     runs the critic as a separate process: locked-down claude, or audited agy
+agents/                  the critic for Claude Code, Cursor, Codex and Antigravity, plus Codex's command-only setting
 .claude-plugin/          Claude Code plugin files
 ```
 

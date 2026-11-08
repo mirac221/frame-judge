@@ -16,7 +16,8 @@ const HELP = `judge.mjs <command> [options]   (state lives in ./.frame-judge, or
   gate     --review <file|->  [--reviewer subagent|headless|human|self] [--model name]
            [--transcript auto|<file.jsonl>]   verify coverage and code-blindness from the critic's real tool calls
   respond  <finding-id> fixed|disputed|wont-fix "<note>" [--evidence image] [--quote "brief words"]
-  status   [--json]`;
+  status   [--json]
+  doctor   what this machine can capture with, which critic runners exist, and what to use`;
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REFS = path.join(SKILL_DIR, 'references');
@@ -26,6 +27,8 @@ const KINDS = ['frontend', 'motion', 'video'];
 const SEVERITY = ['blocker', 'major', 'minor', 'nit'];
 const FINDING_KIND = ['quality', 'missing', 'contradicts', 'unrequested'];
 const PRIOR_STATUS = ['resolved', 'still_open', 'regressed', 'cannot_tell'];
+const ASK_STATUS = ['met', 'partial', 'missing', 'contradicted', 'cannot_tell'];
+const MAX_BEFORE = 6; // round 2+: at most this many "before" frames from the previous round, for open must-fix findings
 const VERDICT = ['pass', 'revise', 'rethink'];
 const REVIEWERS = ['subagent', 'headless', 'human', 'self'];
 const OPEN = new Set(['open', 'still_open', 'regressed', 'cannot_tell']);
@@ -384,8 +387,34 @@ function cmdBundle(args) {
     }
   }
 
+  // Before/after: the previous round's frames behind each still-open must-fix finding, so the critic can
+  // compare instead of judging "is it fixed?" from a text description.
+  const beforeOf = {};
+  if (round > 1) {
+    const prevRound = [...ledger.rounds].reverse().find((r) => r.round < round && r.gated_at && !REGATE.has(r.decision));
+    const prevBundle = prevRound && path.join(dir, `round-${prevRound.round}`, 'bundle');
+    if (prevBundle && exists(path.join(prevBundle, 'manifest.json'))) {
+      const pm = readJson(path.join(prevBundle, 'manifest.json'));
+      let budget = MAX_BEFORE;
+      for (const f of Object.values(ledger.findings)) {
+        if (!(f.bucket === 'must_fix' && OPEN.has(f.status) && f.status !== 'rejected')) continue;
+        for (const e of f.evidence || []) {
+          const a = pm.artifacts.find((x) => x.id === e.artifact);
+          if (!a || beforeOf[a.id] || budget <= 0 || ['previous_round', 'reference', 'dispute_evidence'].includes(a.type)) continue;
+          if (!IMAGE_EXT.has(path.extname(a.file).toLowerCase())) continue;
+          const id = addFile(path.join(prevBundle, a.file), {
+            id: `before-${a.id}`,
+            type: 'previous_round',
+            shows: `BEFORE (round ${prevRound.round}): ${a.shows}. Compare it with this round's matching artifact. Never judge the current work from it.`,
+          });
+          if (id) { beforeOf[a.id] = id; budget--; }
+        }
+      }
+    }
+  }
+
   const imageCount = artifacts.filter((a) => IMAGE_EXT.has(path.extname(a.file))).length;
-  if (!artifacts.some((a) => a.type !== 'reference' && a.type !== 'dispute_evidence'))
+  if (!artifacts.some((a) => !['reference', 'dispute_evidence', 'previous_round'].includes(a.type)))
     die('no visual artifacts found in the given sources (only png/jpg/webp/gif, plus video with --include-video)');
   if (imageCount > MAX_IMAGES && !force)
     die(`${imageCount} images is too many for one critic round (cap ${MAX_IMAGES}). Use fewer slices or viewports, lean on sheets, or pass --force.`);
@@ -416,6 +445,8 @@ function cmdBundle(args) {
       if (!include) continue;
       const p = { id: fid, from_round: f.round, kind: f.kind, criterion: f.criterion, severity: f.severity, observation: f.observation, fix: f.fix, last_status: f.status };
       if (f.brief_quote) p.brief_quote = f.brief_quote;
+      const before = (f.evidence || []).map((e) => beforeOf[e.artifact]).filter(Boolean);
+      if (before.length) p.before_artifacts = before;
       const resp = f.response;
       const fresh = resp && resp.round >= f.last_open_round && OPEN.has(f.status);
       if (fresh && resp.action === 'disputed' && disputeIds[fid]) p.dispute = { claim: trunc(resp.note, 300), evidence_artifact: disputeIds[fid] };
@@ -504,7 +535,7 @@ function auditTranscript(file, roots) {
   const leaks = [];
   for (const u of readToolUses(file)) {
     const input = u.input || {};
-    if (/^(SubagentHandback|StructuredOutput|TodoWrite)$/i.test(u.name)) continue;
+    if (/^(SubagentHandback|StructuredOutput|TodoWrite|finish|wait|wait_5_seconds)$/i.test(u.name)) continue; // bookkeeping tools (Claude Code, agy) touch no files
     if (u.name === 'Read') {
       const p = String(input.file_path || '');
       if (p && inside(p)) opened.add(p); else leaks.push(`Read ${p}`);
@@ -520,6 +551,8 @@ function auditTranscript(file, roots) {
       continue;
     }
     const target = input.file_path || input.path || input.pattern || input.url || '';
+    // Listing or searching inside the bundle is harmless (agy: list_dir / find_by_name; Claude: Glob / LS).
+    if (/^(list_dir|find_by_name|grep_search|Glob|Grep|LS)$/.test(u.name) && target && inside(target)) continue;
     leaks.push(`${u.name}${target ? ` ${trunc(target, 100)}` : ''}`);
   }
   return { file, opened, leaks };
@@ -723,6 +756,53 @@ function cmdGate(args) {
     });
   });
 
+  // ---- the asks ledger: every explicit ask and constraint in the brief, accounted for with evidence ----
+  const rawAsks = Array.isArray(review.asks) ? review.asks : null;
+  const asks = [];
+  (rawAsks || []).forEach((a, i) => {
+    if (!a || typeof a !== 'object') return;
+    const quote = String(a.quote ?? '').trim();
+    let status = norm(a.status).replace(/[\s-]+/g, '_');
+    if (!ASK_STATUS.includes(status)) { warnings.push(`ask ${i + 1}: unknown status "${a.status}", treated as cannot_tell`); status = 'cannot_tell'; }
+    if (!quote || !quoteInBrief(quote, briefText)) { warnings.push(`ask ${i + 1} dropped: its quote isn't in brief.md ("${trunc(quote, 60)}")`); return; }
+    const ev = checkEvidence(a.evidence);
+    if (status !== 'cannot_tell' && !ev.good.length) { warnings.push(`ask "${trunc(quote, 40)}" (${status}) cites no valid artifact, so it counts as cannot_tell`); status = 'cannot_tell'; }
+    asks.push({ quote, status, evidence: ev.good, note: String(a.note ?? '').trim() });
+  });
+  // An unmet ask the critic didn't also file as a finding becomes one, so it can't slip through a pass.
+  const overlaps = (x, y) => { const a = norm(x), b = norm(y); return a && b && (a.includes(b) || b.includes(a)); };
+  const priorFor = (quote) => Object.entries(ledger.findings).find(([, f]) => f.brief_quote && overlaps(f.brief_quote, quote) && f.status !== 'rejected');
+  let askN = 0;
+  for (const a of asks) {
+    const unmet = ['missing', 'contradicted', 'partial'].includes(a.status);
+    if (!unmet && a.status !== 'cannot_tell') continue;
+    if (valid.some((f) => f.brief_quote && overlaps(f.brief_quote, a.quote))) continue;
+    let id = `A${++askN}`;
+    while (seenIds.has(id)) id = `${id}x`;
+    seenIds.add(id);
+    const prior = priorFor(a.quote);
+    valid.push({
+      id, kind: a.status === 'contradicted' ? 'contradicts' : 'missing', criterion: 'scope',
+      severity: 'major',
+      // cannot_tell lands in "verify": the captures don't show this ask, so capture it next round.
+      confidence: unmet ? 0.8 : 0.4,
+      evidence: a.evidence.length ? a.evidence : [{ artifact: 'measurements', at: 'no artifact shows this ask' }],
+      observation: a.note || (unmet ? `The brief asks for "${trunc(a.quote, 80)}", and the critic marked it ${a.status}.` : `No capture shows whether "${trunc(a.quote, 80)}" is met.`),
+      problem: unmet ? `An ask from the brief is ${a.status}.` : 'An ask from the brief cannot be checked from these captures.',
+      fix: unmet ? `Deliver what the brief says: "${trunc(a.quote, 120)}".` : `Capture the state, viewport or moment that shows "${trunc(a.quote, 80)}".`,
+      brief_quote: a.quote,
+      matches_prior: prior ? prior[0] : null,
+      from_asks: true,
+    });
+    notes.push(`ask "${trunc(a.quote, 60)}" is ${a.status} and had no finding of its own, so the gate filed it as ${id}${unmet ? ' (must-fix)' : ' (verify: capture it)'}`);
+  }
+  const askCounts = {
+    total: asks.length,
+    met: asks.filter((a) => a.status === 'met').length,
+    unmet: asks.filter((a) => ['missing', 'contradicted', 'partial'].includes(a.status)).length,
+    cannot_tell: asks.filter((a) => a.status === 'cannot_tell').length,
+  };
+
   const bucketOf = (f) => {
     if (f.severity === 'blocker' || f.severity === 'major') return f.confidence >= minConf ? 'must_fix' : 'verify';
     if (f.severity === 'minor') return f.confidence >= 0.5 ? 'polish' : 'ignored';
@@ -776,11 +856,16 @@ function cmdGate(args) {
   const resolvedNow = rulings.filter((r) => r.status === 'resolved').length;
 
   const coverageGap = !opened || skipped.length > 0;
+  const noAsks = askCounts.total === 0 && norm(briefText).length > 0;
   let decision;
   if (leaked || unusable) decision = attempt >= 2 ? 'STOP_CRITIC_UNRELIABLE' : 'RERUN_CRITIC';
   else if (blockingCount === 0 && coverageGap) {
     decision = attempt >= 2 ? 'STOP_CRITIC_UNRELIABLE' : 'RERUN_CRITIC';
     notes.push('nothing blocking was found, but a pass needs every image looked at, and this critic skipped some or didn\'t say what it opened.');
+  }
+  else if (blockingCount === 0 && noAsks) {
+    decision = attempt >= 2 ? 'STOP_CRITIC_UNRELIABLE' : 'RERUN_CRITIC';
+    notes.push(`nothing blocking was found, but a pass needs the "asks" ledger: every explicit ask in the brief, quoted and checked. This review ${rawAsks ? 'had no ask that quotes brief.md' : 'had no "asks" field'}.`);
   }
   else if (blockingCount === 0) decision = reviewer === 'self' ? 'SELF_PASS' : 'PASS';
   else if (verdict === 'rethink' && buckets.must_fix.some((f) => f.severity === 'blocker')) decision = 'RETHINK';
@@ -799,7 +884,7 @@ function cmdGate(args) {
   }
 
   const coverage = opened ? `${visual.length - skipped.length}/${visual.length} ${coverageSource}` : 'unknown';
-  const counts = { must_fix: buckets.must_fix.length, verify: buckets.verify.length, polish: buckets.polish.length, ignored: buckets.ignored.length, rejected: rejected.length, resolved: resolvedNow, blocking: blockingCount, coverage, transcript_leaks: audit ? audit.leaks.length : null };
+  const counts = { must_fix: buckets.must_fix.length, verify: buckets.verify.length, polish: buckets.polish.length, ignored: buckets.ignored.length, rejected: rejected.length, resolved: resolvedNow, blocking: blockingCount, coverage, transcript_leaks: audit ? audit.leaks.length : null, asks: askCounts };
   if (!discard) {
     for (const r of rulings) {
       const pf = ledger.findings[r.id];
@@ -840,17 +925,18 @@ function cmdGate(args) {
     gut_reaction: trunc(review.gut_reaction, 300), summary: trunc(review.summary, 600),
   });
   saveLedger(dir, ledger);
-  const gate = { round, decision, would_be: wouldBe, reviewer, model, critic_verdict: verdict, min_confidence: minConf, counts, buckets, rejected, prior_rulings: rulings, still_open_from_earlier: priorOpenMustFix, keep: review.keep || [], requests: review.requests || [], scores, warnings, notes };
+  const gate = { round, decision, would_be: wouldBe, reviewer, model, critic_verdict: verdict, min_confidence: minConf, counts, asks, buckets, rejected, prior_rulings: rulings, still_open_from_earlier: priorOpenMustFix, keep: review.keep || [], requests: review.requests || [], scores, warnings, notes };
   writeJson(path.join(roundDir, 'gate.json'), gate);
   if (reviewArg === '-' || path.resolve(String(reviewArg)) !== path.resolve(path.join(roundDir, 'review.json'))) writeJson(path.join(roundDir, 'review.json'), review);
 
-  printDecision({ round, max: ledger.max_rounds, decision, wouldBe, reviewer, model, verdict, coverage, gut: review.gut_reaction, buckets, rejected, rulings, priorOpenMustFix, requests: review.requests, warnings, notes, ledger });
+  printDecision({ round, max: ledger.max_rounds, decision, wouldBe, reviewer, model, verdict, coverage, asks: askCounts, gut: review.gut_reaction, buckets, rejected, rulings, priorOpenMustFix, requests: review.requests, warnings, notes, ledger });
 }
 
 function printDecision(o) {
   const L = (s = '') => console.log(s);
   L(`frame-judge · round ${o.round}/${o.max} · DECISION: ${o.decision}${o.wouldBe ? ` (would be ${o.wouldBe})` : ''}`);
   L(`critic: ${o.reviewer}${o.model ? ` (${o.model})` : ''}${o.verdict ? ` · critic verdict: ${o.verdict}` : ''}${o.coverage ? ` · images opened: ${o.coverage}` : ''}`);
+  if (o.asks && o.asks.total) L(`brief: ${o.asks.met}/${o.asks.total} asks met${o.asks.unmet ? ` · ${o.asks.unmet} unmet` : ''}${o.asks.cannot_tell ? ` · ${o.asks.cannot_tell} not shown in the captures` : ''}`);
   if (o.reason) L(`reason: ${o.reason}`);
   if (o.gut) L(`gut reaction: "${trunc(o.gut, 200)}"`);
   const show = (title, list) => {
@@ -969,6 +1055,7 @@ function cmdStatus(args) {
 
   L('\n--- report block (paste this, then add context) ---');
   L(`Critic: ${last.decision} on round ${last.round} of ${ledger.max_rounds} (${last.reviewer}${last.model ? `, model ${last.model}` : ''}, ${independent ? 'code-blind' : 'SELF-REVIEW, not independent'}${last.counts && last.counts.coverage ? `, images opened ${last.counts.coverage}` : ''})`);
+  if (last.counts && last.counts.asks && last.counts.asks.total) L(`Brief: ${last.counts.asks.met} of ${last.counts.asks.total} explicit asks met, each checked by the critic against the captures${last.counts.asks.cannot_tell ? ` (${last.counts.asks.cannot_tell} not shown in the captures)` : ''}`);
   if (firstGut) L(`Round ${firstGut.round} gut reaction: "${firstGut.gut_reaction}"`);
   if (!passed) L(`Not passed. ${open.filter(([, f]) => f.bucket === 'must_fix').length} must-fix item(s) still open.`);
   if (fixed.length) L(`Fixed: ${fixed.map(([id, f]) => label(id, f)).join(' · ')}`);
@@ -978,11 +1065,49 @@ function cmdStatus(args) {
   L(`Captures: ${last.bundle}/artifacts`);
 }
 
+async function cmdDoctor() {
+  const { spawnSync } = await import('node:child_process');
+  const { createRequire } = await import('node:module');
+  const L = (s = '') => console.log(s);
+  const run = (bin, a, shell = false) => {
+    const r = shell ? spawnSync(`${bin} ${a.join(' ')}`, { encoding: 'utf8', shell: true, windowsHide: true, timeout: 20000 })
+      : spawnSync(bin, a, { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+    const out = `${r.stdout || ''}${r.stderr || ''}`.trim();
+    return r.error || r.status !== 0 || /not recognized|command not found/i.test(out) ? null : out.split('\n')[0];
+  };
+  const host = process.env.CLAUDECODE ? 'claude-code'
+    : (process.env.CURSOR_AGENT || process.env.CURSOR_TRACE_ID || /cursor/i.test(process.env.TERM_PROGRAM || '')) ? 'cursor'
+      : Object.keys(process.env).some((k) => /^ANTIGRAVITY_/.test(k)) ? 'antigravity'
+        : Object.keys(process.env).some((k) => /^CODEX_/.test(k)) ? 'codex' : null;
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  let pw = null;
+  for (const base of [path.join(process.cwd(), 'noop.js'), fileURLToPath(import.meta.url)]) {
+    for (const n of ['playwright', 'playwright-core', '@playwright/test']) { try { createRequire(base).resolve(n); pw = n; break; } catch {} }
+    if (pw) break;
+  }
+  const { findBrowser } = await import(new URL('./cdp.mjs', import.meta.url).href);
+  const browser = findBrowser();
+  L(`frame-judge doctor`);
+  L(`  app: ${host || 'not detected (chat apps use relay mode; see references/platforms.md)'}`);
+  L(`  node ${process.versions.node}${nodeMajor < 18 ? '  <- needs 18+' : ''}`);
+  L(`  ffmpeg: ${run('ffmpeg', ['-version']) ? 'found' : 'MISSING (needed for video and motion: install ffmpeg)'} · ffprobe: ${run('ffprobe', ['-version']) ? 'found' : 'MISSING'}`);
+  L(`  page capture: ${pw ? `Playwright (${pw})` : browser && nodeMajor >= 22 ? `your installed browser over DevTools (${browser}), no install needed` : browser ? `browser found, but capturing without Playwright needs Node 22+` : 'NOTHING: install Chrome/Edge, or Playwright'}`);
+  const critics = {
+    'claude (critic-sandbox, enforced isolation)': run(process.env.CLAUDE_CODE_EXECPATH && fs.existsSync(process.env.CLAUDE_CODE_EXECPATH) ? process.env.CLAUDE_CODE_EXECPATH : 'claude', ['--version']),
+    'agy (critic-sandbox --runner agy, verified isolation)': run('agy', ['--version']),
+    'codex (headless fallback)': run('codex', ['--version']),
+    'cursor agent (headless fallback)': run('agent', ['--version'], process.platform === 'win32'),
+  };
+  for (const [k, v] of Object.entries(critics)) L(`  critic runner ${k}: ${v ? `found (${v})` : 'not found'}`);
+  L('  -> spawn the critic as a fresh subagent in your app, or run scripts/critic-sandbox.mjs where a runner above was found.');
+  L('     Per-app details: references/platforms.md (read only your app\'s section).');
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
-const commands = { init: cmdInit, brief: cmdBrief, set: cmdSet, scout: cmdScout, avoid: cmdAvoid, bundle: cmdBundle, gate: cmdGate, respond: cmdRespond, status: cmdStatus };
+const commands = { doctor: cmdDoctor, init: cmdInit, brief: cmdBrief, set: cmdSet, scout: cmdScout, avoid: cmdAvoid, bundle: cmdBundle, gate: cmdGate, respond: cmdRespond, status: cmdStatus };
 if (!cmd || cmd === 'help' || cmd === '--help' || !commands[cmd]) {
   console.log(HELP);
   process.exit(cmd && cmd !== 'help' && cmd !== '--help' ? 1 : 0);
 }
-commands[cmd](args);
+await commands[cmd](args);

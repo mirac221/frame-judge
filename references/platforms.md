@@ -1,6 +1,9 @@
 # Platforms: installing, spawning the critic, the model question, fallbacks
 
-Checked against vendor docs in November 2026. These tools change fast. If anything here disagrees with your installed version's `--help` or docs, trust those, and tell the user what was different.
+Checked against vendor docs in November 2026.
+
+## Contents
+- Running only on command · Cursor · The slop scout · Claude Code · Codex · Antigravity · Claude app · ChatGPT app · Chat apps: relay · Everything else: the fallback ladder These tools change fast. If anything here disagrees with your installed version's `--help` or docs, trust those, and tell the user what was different.
 
 Every platform has the same three non-negotiables:
 - **A fresh critic each round.** Never a fork or anything else that inherits context.
@@ -14,15 +17,19 @@ frame-judge is command-only. In ordinary chats, the only thing it costs is its o
 - **Codex CLI, IDE and app:** in addition, `agents/openai.yaml` sets `allow_implicit_invocation: false`, a hard switch.
 - **Don't add `disable-model-invocation: true`.** Claude Code and Cursor support it, but Antigravity then hides the skill completely, `/frame-judge` included (tested). The description gives the same behavior everywhere.
 
-How to invoke it: `/frame-judge` in Claude Code, Cursor and Antigravity (`/frame-judge:frame-judge` as a Claude Code plugin); `$frame-judge` in Codex; `@frame-judge` in the ChatGPT app; "use frame-judge" anywhere else.
+How to invoke it: `/frame-judge` in Claude Code, Cursor (IDE and CLI) and Antigravity (`/frame-judge:frame-judge` as a Claude Code plugin); `$frame-judge` in Codex and the ChatGPT desktop app's Codex mode; `@frame-judge` in ChatGPT Chat and Work; "use frame-judge" anywhere else.
 
-## Cursor
+## Cursor (IDE and Cursor CLI)
 
-**Install:** Cursor reads `~/.cursor/skills/`, `~/.agents/skills/` and `~/.claude/skills/`, plus the same folders in a project. Install the skill in one of them only, or Cursor sees duplicates. If you already installed it for Claude Code or Codex, Cursor picks that copy up.
+**Install:** `node scripts/install.mjs` (or by hand). Cursor reads skills from `~/.cursor/skills/`, `~/.agents/skills/`, `~/.claude/skills/` and `~/.codex/skills/`, plus the same folders in a project. If the skill is already installed for Claude Code or Codex, Cursor uses that copy.
 
-**Critic:** if your Cursor version has subagents, spawn a fresh one with the spawn message. Otherwise use `critic-sandbox.mjs` (if the Claude Code CLI is installed) or the human relay below. Coverage is self-reported unless you use the sandbox.
+**Critic agent:** `agents/cursor/frame-critic.md` goes to `~/.cursor/agents/` (or `<repo>/.cursor/agents/`). It sets `readonly: true`, so the critic can't edit files or run state-changing commands. Cursor also reads `.claude/agents/` and `.codex/agents/`; on a name clash `.cursor/` wins.
 
-**Model question:** ask only if your Cursor version lets you pick a subagent's model.
+**Spawn:** ask Agent to run the `frame-critic` subagent with the spawn message, verbatim, or type `/frame-critic <spawn message>`. Subagents start with a fresh context, so the critic doesn't inherit the conversation. Cursor subagents can't be limited to the bundle folder, so coverage is self-reported. If the `claude` or `agy` CLI is installed, `critic-sandbox.mjs` gives you a separate process with recorded tool calls instead.
+
+**Model question:** ask in chat. A subagent's model comes from `model:` in its agent file (`inherit` by default, or an id such as `claude-opus-5[effort=high]`). Changing it means editing that file, which is the user's config: ask first. Otherwise say the critic runs on the same model as you.
+
+**Cursor CLI:** the same skills, agents and subagents load in `agent` (the Cursor CLI). Untested here, because Cursor isn't installed on the test machine.
 
 ## The slop scout (unslop mode)
 
@@ -109,7 +116,16 @@ codex exec -m <model> -s read-only -o ../review.json \
 - **Skill:** `<workspace>/.agents/skills/frame-judge/`, or global `~/.gemini/config/skills/frame-judge/`. The IDE also reads the legacy `~/.gemini/antigravity/skills/`. In the CLI, run `/skills reload` after adding it.
 - **Critic agent:** copy `agents/antigravity/frame-critic.md` to `<workspace>/.agents/agents/frame-critic.md` or `~/.gemini/config/agents/frame-critic.md`.
 
-**Model question: don't ask.** Antigravity has no per-spawn model choice. The critic runs on its agent file's setting, `model: inherit` (the parent's model), and that's what you tell the user. A user who wants a fixed tier can change that line to `flash` or `pro` themselves; those are Gemini tiers and draw from the Gemini quota pool, not the Claude/GPT one.
+**Sandboxed critic (recommended when the `agy` CLI is installed):**
+```bash
+node <skill>/scripts/critic-sandbox.mjs --runner agy --model claude-sonnet-4-6
+```
+- It copies the bundle to a private temp folder and runs `agy -p` there in plan mode, with output held to `review.schema.json`.
+- It records every tool call from agy's event stream. The gate counts the images the critic really opened, and voids the review if it read anything outside the copy.
+- Any id from `agy models` works. The model question is then a real choice: Claude Sonnet (recommended), Claude Opus, or a Gemini tier.
+- Each run shows up as its own conversation in Antigravity's history.
+
+**Model question for `invoke_subagent`: don't ask.** Antigravity has no per-spawn model choice. The critic runs on its agent file's setting, `model: inherit` (the parent's model), and that's what you tell the user. A user who wants a fixed tier can change that line to `flash` or `pro` themselves; those are Gemini tiers and draw from the Gemini quota pool, not the Claude/GPT one.
 
 **Spawn:** call `invoke_subagent` with the `frame-critic` agent and the spawn message. Workspace mode `inherit` is fine, because the critic only reads. If the agent file isn't installed, `define_subagent` can create a transient critic; give it the body of `agents/antigravity/frame-critic.md`.
 
@@ -118,6 +134,26 @@ codex exec -m <model> -s read-only -o ../review.json \
 **Tools:** the agent file grants only `view_file`. Tool names must be exact; a misspelled one can hang the subagent. If the critic reports it can't see images through `view_file` on your version, switch to the human relay, or use a fresh Agent Manager conversation as the critic.
 
 **Video:** Gemini models take video natively. Bundle with `--include-video` so a Gemini critic can watch the clip. It still has to cite sheet tiles and timestamps.
+
+## Claude app (desktop and claude.ai)
+
+- **Code tab of the Claude desktop app:** that's Claude Code; use the Claude Code section.
+- **Cowork:** it installs Claude Code plugins (`/plugin marketplace add mirac221/frame-judge`), and Anthropic's docs say subagents run there. Spawn `frame-judge:frame-critic` as you would in Claude Code. Not tested in Cowork.
+- **claude.ai chat:** upload the zip from `node scripts/install.mjs --zip` (Settings > Capabilities > code execution on, then Skills > Upload). The code-execution sandbox can install packages, so `npm i playwright && npx playwright install chromium` can make page capture work there. There are no subagents, so the critic runs as a **relay** (below).
+
+## ChatGPT app
+
+- **Codex mode in the ChatGPT desktop app** (the former Codex app): same skills folder (`~/.agents/skills/`), same `frame_critic` agent (`~/.codex/agents/`), same `$frame-judge`. Use the Codex section.
+- **ChatGPT Work:** upload the zip and invoke it with `@frame-judge`. Work can run subagents in its hosted environment, so spawn a fresh one with the spawn message. If its environment can't run the capture scripts, capture locally and relay.
+- **ChatGPT Chat:** upload the zip and use relay mode.
+
+## Chat apps: relay
+
+When the app can't start an independent agent:
+1. Capture and bundle as usual, wherever the scripts can run.
+2. Give the user `round-N/bundle/packet.md` and the `artifacts/` folder. They open a **fresh** chat with any vision model, paste the packet, attach every image, and paste the JSON reply back.
+3. Run `gate --reviewer human`. The asks list, coverage and evidence rules apply as usual.
+4. If the user won't relay, use self-review (`gate --reviewer self`, at most `SELF_PASS`) and say so plainly.
 
 ## Everything else: the fallback ladder
 
