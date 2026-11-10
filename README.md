@@ -44,7 +44,7 @@ Each finding behind that verdict pointed at specific frames, and a script checke
 
 ## What the critic checks now
 
-**Every ask, one by one.** AI builders rarely fail by building something ugly. They fail by quietly dropping part of what you asked for. So the critic has to quote every explicit ask in your request, word for word, and mark each one met, partial, missing or contradicted, pointing at the frame that shows it. A script checks every quote against your actual words. An unmet ask becomes a must-fix even if the critic forgot to file it, and a "pass" without this list is sent back.
+**Every ask, one by one.** AI builders rarely fail by building something ugly. They fail by quietly dropping part of what you asked for. So the critic has to quote every explicit ask in your request, word for word, and mark each one met, partial, missing or contradicted, pointing at the frame that shows it. A script checks every quote against your actual words. An unmet ask becomes a must-fix even if the critic forgot to file it, and a "pass" without this list is sent back. Asks no frame can show ("plain HTML, no frameworks") are marked not visual and handed back to your AI to check, and the report says the critic didn't check them.
 
 From a real run on a motion brief (Claude Haiku built it, a Sonnet critic judged it, 18 of 18 frames opened, verified from its transcript):
 
@@ -63,7 +63,7 @@ brief: 8/8 asks met
 
 So on briefs this size, today's models mostly get it right, and frame-judge's job is to *prove* that with evidence, in about a minute, instead of you taking "looks great!" on faith. Where it earns its keep is where models still slip: long briefs, motion, and responsive details. The walking-robot test above is one of those.
 
-**Before and after.** From round 2 on, the critic gets the previous round's frames next to the new ones for every open problem, so "fixed" is checked by comparing, not by taking the builder's word for it.
+**Before and after.** From round 2 on, the critic gets the previous round's frames next to the new ones for every open problem, so "fixed" is checked by comparing, not by taking the builder's word for it. The new critic also gets the list of asks earlier critics quoted, without their verdicts, and one it leaves out counts as unchecked, not as met.
 
 ## Run it
 
@@ -163,7 +163,8 @@ Copy-Item "$HOME\.claude\skills\frame-judge\agents\claude-code\frame-critic.md" 
 |---|---|
 | The builder grades its own work | The critic never gets the code, the builder's reasoning, or its "I fixed it" claims. A script checks the critic's instructions weren't edited to go easy. |
 | The critic peeks at the code anyway | With the Claude Code CLI installed, the critic runs as a separate, locked-down process on a private copy of the review folder. A hook blocks any read outside that copy, so it's enforced, not just asked for. With Antigravity's `agy` CLI, the critic runs the same way, and every file it opened is checked afterwards. In-session critics on Claude Code are audited too: any review whose transcript shows it touched other files is thrown out. Cursor and Codex subagents have no per-agent file sandbox, so there it's instruction-only (Cursor's critic is at least read-only). |
-| The critic skips half your request | It must list every explicit ask from your words, quoted verbatim, with a status and a frame. Made-up quotes are dropped; unmet asks become must-fix items; a pass without the list is sent back. |
+| The critic skips half your request | It must list every explicit ask from your words, quoted verbatim, with a status and a frame. Made-up quotes are dropped; unmet asks become must-fix items; a pass without the list is sent back. From round 2 on, an ask an earlier critic listed can't quietly drop off the list. |
+| Part of your request isn't visual at all | "No frameworks" or "one HTML file" can't be judged from pixels, and a code-blind critic can't open the code. It marks those not visual, and your AI has to check them itself and say in its report that the critic didn't. |
 | The critic only criticizes | Every criticism needs evidence. A pass is a legitimate verdict, and the critic must name what works so fixes don't break it. |
 | "Good" is subjective | Written rubrics for websites, motion and video, with 1–5 scores and named red flags: foot sliding, linear easing, AI-template tells, and more. |
 | The critic makes things up | A finding has to cite a frame it actually opened, or quote your request word for word. Otherwise it's thrown out. Unsure findings get a closer capture, not a blind fix. |

@@ -67,7 +67,8 @@
               "partial",
               "missing",
               "contradicted",
-              "cannot_tell"
+              "cannot_tell",
+              "not_visual"
             ]
           },
           "evidence": {

@@ -27,7 +27,7 @@ const KINDS = ['frontend', 'motion', 'video'];
 const SEVERITY = ['blocker', 'major', 'minor', 'nit'];
 const FINDING_KIND = ['quality', 'missing', 'contradicts', 'unrequested'];
 const PRIOR_STATUS = ['resolved', 'still_open', 'regressed', 'cannot_tell'];
-const ASK_STATUS = ['met', 'partial', 'missing', 'contradicted', 'cannot_tell'];
+const ASK_STATUS = ['met', 'partial', 'missing', 'contradicted', 'cannot_tell', 'not_visual'];
 const MAX_BEFORE = 6; // round 2+: at most this many "before" frames from the previous round, for open must-fix findings
 const VERDICT = ['pass', 'revise', 'rethink'];
 const REVIEWERS = ['subagent', 'headless', 'human', 'self'];
@@ -286,6 +286,26 @@ function cmdSet(args) {
   console.log(`frame-judge: ${key} = ${value}`);
 }
 
+// Every ask an earlier (usable) review quoted from the brief, with the status it last had. A fresh critic
+// re-reads the brief each round, so without this an ask that was met in round 1 can silently drop off the list.
+const asksOverlap = (x, y) => { const a = norm(x), b = norm(y); return Boolean(a && b && (a.includes(b) || b.includes(a))); };
+function earlierAsks(dir, ledger, round) {
+  const seen = [];
+  for (const r of ledger.rounds) {
+    if (r.round >= round || !r.gated_at || REGATE.has(r.decision)) continue;
+    const gp = path.join(dir, `round-${r.round}`, 'gate.json');
+    if (!exists(gp)) continue;
+    let g;
+    try { g = readJson(gp); } catch { continue; }
+    for (const a of g.asks || []) {
+      if (!a || !a.quote) continue;
+      const i = seen.findIndex((x) => asksOverlap(x.quote, a.quote));
+      if (i > -1) seen[i].status = a.status; else seen.push({ quote: a.quote, status: a.status });
+    }
+  }
+  return seen;
+}
+
 function cmdBundle(args) {
   const dir = stateDir(args);
   const ledger = loadLedger(dir);
@@ -440,8 +460,13 @@ function cmdBundle(args) {
       note: 'Findings from earlier rounds. Judge each one only from this round\'s artifacts. The builder\'s claims of having fixed something are deliberately left out. Disputes and refusals are listed with the builder\'s evidence or brief quote, for you to rule on.',
       findings: [],
     };
+    const listedBefore = earlierAsks(dir, ledger, round).map((a) => a.quote);
+    if (listedBefore.length) {
+      prior.asks_listed_before = listedBefore;
+      prior.asks_note = 'Asks that earlier critics quoted from the brief. Their statuses are left out on purpose: settle each one yourself from this round\'s artifacts, and add any ask they missed.';
+    }
     for (const [fid, f] of Object.entries(ledger.findings)) {
-      const include = (f.bucket === 'must_fix' && f.status !== 'rejected') || (['verify', 'polish'].includes(f.bucket) && OPEN.has(f.status));
+      const include =(f.bucket === 'must_fix' && f.status !== 'rejected') || (['verify', 'polish'].includes(f.bucket) && OPEN.has(f.status));
       if (!include) continue;
       const p = { id: fid, from_round: f.round, kind: f.kind, criterion: f.criterion, severity: f.severity, observation: f.observation, fix: f.fix, last_status: f.status };
       if (f.brief_quote) p.brief_quote = f.brief_quote;
@@ -766,11 +791,20 @@ function cmdGate(args) {
     if (!ASK_STATUS.includes(status)) { warnings.push(`ask ${i + 1}: unknown status "${a.status}", treated as cannot_tell`); status = 'cannot_tell'; }
     if (!quote || !quoteInBrief(quote, briefText)) { warnings.push(`ask ${i + 1} dropped: its quote isn't in brief.md ("${trunc(quote, 60)}")`); return; }
     const ev = checkEvidence(a.evidence);
-    if (status !== 'cannot_tell' && !ev.good.length) { warnings.push(`ask "${trunc(quote, 40)}" (${status}) cites no valid artifact, so it counts as cannot_tell`); status = 'cannot_tell'; }
+    if (!['cannot_tell', 'not_visual'].includes(status) && !ev.good.length) { warnings.push(`ask "${trunc(quote, 40)}" (${status}) cites no valid artifact, so it counts as cannot_tell`); status = 'cannot_tell'; }
     asks.push({ quote, status, evidence: ev.good, note: String(a.note ?? '').trim() });
   });
+  // An ask an earlier critic listed and this one left out isn't "met": nothing checked it this round.
+  if (rawAsks) {
+    for (const e of earlierAsks(dir, ledger, round)) {
+      if (asks.some((a) => asksOverlap(a.quote, e.quote)) || !quoteInBrief(e.quote, briefText)) continue;
+      const status = e.status === 'not_visual' ? 'not_visual' : 'cannot_tell';
+      asks.push({ quote: e.quote, status, evidence: [], note: 'An earlier critic listed this ask and this one left it out, so nothing checked it this round.', carried: true });
+      warnings.push(`ask "${trunc(e.quote, 60)}" was listed by an earlier critic and is missing from this review, so it counts as ${status}`);
+    }
+  }
   // An unmet ask the critic didn't also file as a finding becomes one, so it can't slip through a pass.
-  const overlaps = (x, y) => { const a = norm(x), b = norm(y); return a && b && (a.includes(b) || b.includes(a)); };
+  const overlaps = asksOverlap;
   const priorFor = (quote) => Object.entries(ledger.findings).find(([, f]) => f.brief_quote && overlaps(f.brief_quote, quote) && f.status !== 'rejected');
   let askN = 0;
   for (const a of asks) {
@@ -801,7 +835,13 @@ function cmdGate(args) {
     met: asks.filter((a) => a.status === 'met').length,
     unmet: asks.filter((a) => ['missing', 'contradicted', 'partial'].includes(a.status)).length,
     cannot_tell: asks.filter((a) => a.status === 'cannot_tell').length,
+    not_visual: asks.filter((a) => a.status === 'not_visual').length,
   };
+  // No render can show these (stack, file layout, load time...). The critic is code-blind, so they go back to
+  // the builder, who has to check them and say in the report that the critic didn't.
+  const notVisual = asks.filter((a) => a.status === 'not_visual').map((a) => a.quote);
+  if (notVisual.length) notes.push(`${notVisual.length} ask(s) can't be seen in any render, so the critic didn't check them. Check each one yourself and report it as self-checked: ${notVisual.map((q) => `"${trunc(q, 60)}"`).join(', ')}`);
+  if (asks.length && notVisual.length === asks.length) warnings.push('the critic marked every ask not_visual, so nothing in the brief was checked against the captures. If any of them shows on screen, run a fresh critic.');
 
   const bucketOf = (f) => {
     if (f.severity === 'blocker' || f.severity === 'major') return f.confidence >= minConf ? 'must_fix' : 'verify';
@@ -923,6 +963,7 @@ function cmdGate(args) {
   Object.assign(entry, {
     gated_at: now(), reviewer, model, attempts: attempt, critic_verdict: verdict, decision, counts,
     gut_reaction: trunc(review.gut_reaction, 300), summary: trunc(review.summary, 600),
+    not_visual_asks: notVisual,
   });
   saveLedger(dir, ledger);
   const gate = { round, decision, would_be: wouldBe, reviewer, model, critic_verdict: verdict, min_confidence: minConf, counts, asks, buckets, rejected, prior_rulings: rulings, still_open_from_earlier: priorOpenMustFix, keep: review.keep || [], requests: review.requests || [], scores, warnings, notes };
@@ -936,7 +977,7 @@ function printDecision(o) {
   const L = (s = '') => console.log(s);
   L(`frame-judge · round ${o.round}/${o.max} · DECISION: ${o.decision}${o.wouldBe ? ` (would be ${o.wouldBe})` : ''}`);
   L(`critic: ${o.reviewer}${o.model ? ` (${o.model})` : ''}${o.verdict ? ` · critic verdict: ${o.verdict}` : ''}${o.coverage ? ` · images opened: ${o.coverage}` : ''}`);
-  if (o.asks && o.asks.total) L(`brief: ${o.asks.met}/${o.asks.total} asks met${o.asks.unmet ? ` · ${o.asks.unmet} unmet` : ''}${o.asks.cannot_tell ? ` · ${o.asks.cannot_tell} not shown in the captures` : ''}`);
+  if (o.asks && o.asks.total) L(`brief: ${o.asks.met}/${o.asks.total - (o.asks.not_visual || 0)} ${o.asks.not_visual ? 'visual ' : ''}asks met${o.asks.unmet ? ` · ${o.asks.unmet} unmet` : ''}${o.asks.cannot_tell ? ` · ${o.asks.cannot_tell} not shown in the captures` : ''}${o.asks.not_visual ? ` · ${o.asks.not_visual} not visual (yours to check)` : ''}`);
   if (o.reason) L(`reason: ${o.reason}`);
   if (o.gut) L(`gut reaction: "${trunc(o.gut, 200)}"`);
   const show = (title, list) => {
@@ -1055,7 +1096,12 @@ function cmdStatus(args) {
 
   L('\n--- report block (paste this, then add context) ---');
   L(`Critic: ${last.decision} on round ${last.round} of ${ledger.max_rounds} (${last.reviewer}${last.model ? `, model ${last.model}` : ''}, ${independent ? 'code-blind' : 'SELF-REVIEW, not independent'}${last.counts && last.counts.coverage ? `, images opened ${last.counts.coverage}` : ''})`);
-  if (last.counts && last.counts.asks && last.counts.asks.total) L(`Brief: ${last.counts.asks.met} of ${last.counts.asks.total} explicit asks met, each checked by the critic against the captures${last.counts.asks.cannot_tell ? ` (${last.counts.asks.cannot_tell} not shown in the captures)` : ''}`);
+  if (last.counts && last.counts.asks && last.counts.asks.total) {
+    const A = last.counts.asks;
+    const nv = A.not_visual || 0;
+    if (A.total - nv > 0) L(`Brief: ${A.met} of ${A.total - nv} ${nv ? 'visual' : 'explicit'} asks met, each checked by the critic against the captures${A.cannot_tell ? ` (${A.cannot_tell} not shown in the captures)` : ''}`);
+    if (nv) L(`Not visual, so NOT checked by the critic (say how you checked each one, or that you didn't): ${(last.not_visual_asks || []).map((q) => `"${trunc(q, 70)}"`).join(' · ')}`);
+  }
   if (firstGut) L(`Round ${firstGut.round} gut reaction: "${firstGut.gut_reaction}"`);
   if (!passed) L(`Not passed. ${open.filter(([, f]) => f.bucket === 'must_fix').length} must-fix item(s) still open.`);
   if (fixed.length) L(`Fixed: ${fixed.map(([id, f]) => label(id, f)).join(' · ')}`);

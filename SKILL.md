@@ -4,7 +4,7 @@ description: Command-only. Runs only when the user invokes it by name (/frame-ju
 license: Apache-2.0
 compatibility: Needs Node 18+ and ffmpeg. Page capture uses Playwright, or with Node 22+ an installed Chrome, Edge or Chromium (no install). Critic: a fresh subagent (Claude Code, Cursor, Codex, ChatGPT desktop, Antigravity) or a sandboxed claude / agy process. Chat apps (claude.ai, ChatGPT web) use relay mode.
 metadata:
-  version: "0.5.0"
+  version: "0.6.0"
 ---
 
 # frame-judge
@@ -28,8 +28,8 @@ It prints the app you're in, what can capture pages (Playwright, or your install
 | You are running in | Critic | Section |
 |---|---|---|
 | Claude Code: CLI, Claude desktop app (Code tab), IDE extension | `critic-sandbox.mjs` (enforced isolation), else the `frame-critic` subagent | Claude Code |
-| Cursor: IDE or Cursor CLI | the `frame-critic` subagent (read-only) | Cursor |
-| Codex: CLI, IDE extension, ChatGPT desktop app in Codex mode | the `frame_critic` agent | Codex |
+| Cursor: IDE or Cursor CLI | `critic-sandbox.mjs` if the doctor found `claude` or `agy`, else the `frame-critic` subagent (read-only) | Cursor |
+| Codex: CLI, IDE extension, ChatGPT desktop app in Codex mode | `critic-sandbox.mjs` if the doctor found `claude` or `agy`, else the `frame_critic` agent | Codex |
 | Antigravity: app, IDE, `agy` CLI | `critic-sandbox.mjs --runner agy`, or `invoke_subagent` | Antigravity |
 | Claude Cowork, ChatGPT Work | a fresh subagent | Claude app / ChatGPT app |
 | claude.ai chat, ChatGPT Chat | relay: the user runs the critic in a fresh chat | Chat apps |
@@ -45,7 +45,7 @@ It prints the app you're in, what can capture pages (Playwright, or your install
 | 3 | Mechanical self-check: it renders, nothing blank, no runtime errors | you |
 | 4 | Bundle a code-free review packet | script |
 | 5 | Ask which model the critic runs on, if the platform allows it (once) | you, then the user |
-| 6 | Critic reviews the bundle | fresh subagent |
+| 6 | Critic reviews the bundle | a fresh critic: sandboxed process, or subagent |
 | 7 | Gate validates the review and decides | script |
 | 8 | Answer every must-fix finding, then back to step 2 | you |
 | 9 | Report the critic's verdict, not your opinion | you |
@@ -73,7 +73,7 @@ Ask the user once, in these words:
 
 > Do you want it unsloppy? (experimental: may decrease quality and will spend more tokens)
 
-On Claude Code, ask with AskUserQuestion, in the same prompt as the critic-model question from step 5. Elsewhere, ask in chat. Skip it if the user already said.
+On Claude Code, ask with AskUserQuestion, and put the critic-model question from step 5 in the same prompt, so the user is interrupted once and step 5 is already done when you get there. Elsewhere, ask both in one chat message. Skip whichever the user already answered.
 
 - **No:** carry on. Unslop is off by default.
 - **Yes:**
@@ -158,7 +158,7 @@ The script won't open a new round while must-fix findings are unanswered, or pas
 
 ## 5. Choose the critic's model (only where the platform supports it)
 
-Ask only if your app lets you pick the critic's model, and only once, before round 1. Skip it if the user already named one. Save the answer with `judge.mjs set critic-model <alias>` and reuse it every round.
+Ask only if your app lets you pick the critic's model, and only once, before round 1. If you asked it together with the unslop question in step 0b, or the user already named a model, don't ask again. Save the answer with `judge.mjs set critic-model <alias>` and reuse it every round.
 
 - **Claude Code, Claude apps:** AskUserQuestion, in the same prompt as the unslop question: Sonnet (balanced, recommended), Opus (sharpest eye, most quota), Haiku (cheapest, misses subtle issues), Same as me.
 - **Cursor, Codex, ChatGPT desktop:** ask in chat; offer the models the app lists, or "same as me".
@@ -174,13 +174,18 @@ Use a **fresh** critic every round, so it has no memory beyond `prior.json` and 
 
 - **Add nothing.** No summary of what you built, no "focus on the header", no "I fixed the legs". Your opinion is the one input the critic must never get. If the user wants something checked, it's already in the brief, in their words.
 - **No forks.** Never run the critic as a fork or anything else that inherits context. It would see your whole conversation, code included.
-- **Prefer the installed agent.** Use `frame-critic` if it exists, because it's limited to reading files. Its name is `frame-judge:frame-critic` when the skill came in as a Claude Code plugin, and `frame_critic` in Codex. Otherwise use a general-purpose subagent with the same message.
-- **Run the sandbox if you can.** `node <skill>/scripts/critic-sandbox.mjs` runs the critic as a separate headless process on a private copy of the bundle, records its real tool calls, and gates the review itself (skip step 7).
-  - `--runner claude` (default, needs the `claude` CLI): only the Read tool, plus a hook that blocks any read outside the copy. Code-blindness is **enforced**.
-  - `--runner agy` (needs Antigravity's `agy` CLI): its reads are audited afterwards, and a peek outside the copy voids the review. Code-blindness is **verified**.
-- **Everywhere else:** use the in-session subagent, and code-blindness rests on the critic's instructions. On Claude Code, the transcript audit in step 7 still catches a critic that peeked. In Cursor, Codex and Antigravity subagents nothing checks it, so say so in your report.
 
-Save the reply, untouched, to `.frame-judge/round-N/review.json`.
+Which critic to run: take the first of these that the doctor says you have.
+
+1. **The sandbox**, when the doctor found the `claude` or `agy` CLI. `node <skill>/scripts/critic-sandbox.mjs --model <the chosen model>` runs the critic as a separate headless process on a private copy of the bundle, records its real tool calls, saves the review and gates it itself. **Skip step 7** and go by the decision it prints.
+   - `--runner claude` (default): only the Read tool, plus a hook that blocks any read outside the copy. Code-blindness is **enforced**.
+   - `--runner agy`: its reads are audited afterwards, and a peek outside the copy voids the review. Code-blindness is **verified**.
+2. **The installed `frame-critic` agent**, as a subagent. It's limited to reading files. Its name is `frame-judge:frame-critic` when the skill came in as a Claude Code plugin, and `frame_critic` in Codex.
+3. **A general-purpose subagent** with the same message.
+
+With 2 and 3, code-blindness rests on the critic's instructions. On Claude Code, the transcript audit in step 7 still catches a critic that peeked. In Cursor, Codex and Antigravity subagents nothing checks it, so say so in your report. Save the subagent's reply, untouched, to `.frame-judge/round-N/review.json`.
+
+No subagents and no CLI? See "When the platform can't do it" below.
 
 ## 7. Gate
 
@@ -192,7 +197,8 @@ On Claude Code, `--transcript auto` finds the critic subagent's transcript, so t
 The gate decides, not the critic's mood and not you. It:
 - **Rejects** findings that cite artifact IDs that don't exist or that the critic never opened, findings with no evidence, brief quotes that aren't in the brief, and bad severity or confidence values.
 - **Checks coverage:** a pass only counts if the critic opened every image, verified from its transcript where one exists, otherwise from its own `opened` list.
-- **Checks the brief, ask by ask:** the critic must list every explicit ask and constraint in the brief, quoted verbatim and marked `met`, `partial`, `missing`, `contradicted` or `cannot_tell`, with evidence. Quotes that aren't in the brief are dropped. An unmet ask without its own finding becomes a must-fix; a `cannot_tell` ask becomes a verify item (capture it). A pass without this list is sent back.
+- **Checks the brief, ask by ask:** the critic must list every explicit ask and constraint in the brief, quoted verbatim and marked `met`, `partial`, `missing`, `contradicted` or `cannot_tell`, with evidence. Quotes that aren't in the brief are dropped. An unmet ask without its own finding becomes a must-fix; a `cannot_tell` ask becomes a verify item (capture it). A pass without this list is sent back. From round 2 on, an ask an earlier critic listed and this one left out counts as `cannot_tell`, not as met.
+- **Hands back what pixels can't show:** asks the critic marks `not_visual` ("no frameworks", "one HTML file", "loads in under a second") are listed for you. No critic checked them. Check each one yourself, with a command or by reading the file, before you report.
 - **Checks isolation:** with a transcript, any read outside the bundle voids the review (`RERUN_CRITIC`).
 - **Sorts** the rest:
   - **must-fix**: blocker or major, confidence 0.6 or higher
@@ -245,18 +251,18 @@ Disputed: R1-F4, upheld by the critic, fixed in round 2
 
 - If it didn't pass, say so first and list what's still open.
 - Never describe your own output as great, smooth, polished, clean or pixel-perfect. Quote the critic.
+- If the block has a "Not visual" line, those asks were outside what the critic can see. For each one, say how you checked it ("no framework: `index.html` loads no scripts but its own"), or that you didn't. Never fold them into the critic's count.
 - If the review wasn't independent (self-review), or ran on a different model than the user chose, say so.
 
 ## When the platform can't do it
 
-Use the first option that works, and tell the user which one you used:
+Step 6 covers the normal cases: the sandbox, then a subagent. When neither exists, or the subagent can't run on the model the user chose, use the first of these that works, and tell the user which one you used:
 
-1. **Native subagent, chosen model.** Claude Code, Codex, Antigravity.
-2. **Native subagent, default model.** The platform can't choose; say so.
-3. **Headless critic process.** `critic-sandbox.mjs` on any machine with the Claude Code CLI (strongest isolation), or `codex exec` started inside the bundle folder. Commands are in platforms.md.
-4. **Human relay** (also how chat apps such as claude.ai and ChatGPT Chat work). `bundle` also writes `packet.md`. The user pastes it and the images into any fresh chat with a vision-capable model, then hands you the JSON. Run `gate --reviewer human`.
-5. **Self-review**, last resort. Re-read nothing from the project and play the critic from the bundle alone. `gate --reviewer self` can only ever return `SELF_PASS`, and your report must say the work wasn't independently reviewed.
-6. **No vision at all.** You can't judge visuals. Say so, hand over the captures, and let a human look.
+1. **Subagent on the default model.** The platform can't choose per subagent; say so.
+2. **Another headless critic.** `codex exec` (or any CLI agent that can read images) started inside the bundle folder; gate with `--reviewer headless`. The command is in platforms.md.
+3. **Human relay** (also how chat apps such as claude.ai and ChatGPT Chat work). `bundle` also writes `packet.md`. The user pastes it and the images into any fresh chat with a vision-capable model, then hands you the JSON. Run `gate --reviewer human`.
+4. **Self-review**, last resort. Re-read nothing from the project and play the critic from the bundle alone. `gate --reviewer self` can only ever return `SELF_PASS`, and your report must say the work wasn't independently reviewed.
+5. **No vision at all.** You can't judge visuals. Say so, hand over the captures, and let a human look.
 
 ## Files
 

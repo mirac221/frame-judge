@@ -11,7 +11,7 @@ Another AI built something visual for a user. Your job is to judge what it actua
 | `rubric.md` | The criteria you score. Each has a `criterion` id. |
 | `artifacts/` | Screenshots, contact sheets, filmstrips and motion trails. There may also be a video, reference images the user supplied (`type: "reference"`), and from round 2 on, `before-*` frames from the previous round (`type: "previous_round"`). |
 | `avoid.md` | Only in unslop mode: the AI-default patterns a scout found for this kind of request, with sources. |
-| `prior.json` | Round 2 and later only. Findings from earlier rounds. **Don't open it until step 6.** |
+| `prior.json` | Round 2 and later only. Findings from earlier rounds, and the asks earlier critics listed. **Don't open it until step 6.** |
 
 ## Hard rules
 
@@ -76,6 +76,7 @@ Only score criteria that the artifacts actually show.
    - `missing`: it should be visible in the artifacts that cover it, and it isn't. Cite the artifacts where it should have been.
    - `contradicted`: the work does the opposite. Cite it.
    - `cannot_tell`: no artifact covers it, or covers that part of it (a state, viewport or moment that wasn't captured). Add a `requests` entry for a capture that would. Never use `partial` or `missing` for something the captures simply don't show: that's the builder's capture gap, not a defect in the work.
+   - `not_visual`: no render of any kind could show it: the tech stack ("plain HTML, no frameworks"), file layout, code style, load time, what a link points to. Say why in `note`, leave `evidence` empty, and add no request. It goes back to the builder, who is told to check it and to report that you didn't. Only for asks nothing on screen could settle: if a screenshot, state shot or frame *could* show it, it's `cannot_tell`.
 
    Every ask that is `partial`, `missing` or `contradicted` also needs a `missing` or `contradicts` finding with the same `brief_quote`. The gate files one for you if you forget, at `major`. Then check what was added without being asked.
    - If `avoid.md` exists, check the work against every pattern in it. Each one it falls into is an `identity` finding: `major` if it shapes the overall look, `minor` if it's a detail. Cite the artifact, and name the pattern in `problem`.
@@ -86,6 +87,7 @@ Only score criteria that the artifacts actually show.
    - Where the builder disputed a finding, look at its evidence artifact and rule. If the defect is gone, mark it `resolved` and say why. If it's still there, `still_open`.
    - Where the builder declined to fix a finding and quoted the brief, check the quote. If the user really asked for it, mark it `resolved` and say so. Otherwise, `still_open`.
    - If a new finding is the same issue as a prior one, set `matches_prior`.
+   - If `prior.json` has `asks_listed_before`, compare it with your `asks`. Those are asks earlier critics quoted from the brief, without their statuses. Any that your list doesn't cover, add and settle now, from this round's artifacts. Your quotes may split the brief differently; what matters is that nothing they listed goes unchecked.
 7. **Self-audit.**
    - Drop anything you can't point at.
    - Lower confidence where the resolution is too low.
@@ -165,7 +167,7 @@ Field rules:
 | `kind` | `quality`, `missing`, `contradicts` or `unrequested` |
 | `criterion` | A rubric id. Use `scope` for the three scope kinds. |
 | `opened` | Every artifact id you opened. Evidence may only cite these, plus `measurements`. |
-| `asks` | Every explicit ask and constraint in `brief.md`: `{ "quote", "status", "evidence", "note" }`. `quote` is verbatim; `status` is `met`, `partial`, `missing`, `contradicted` or `cannot_tell`. Required, and a pass without it is sent back. |
+| `asks` | Every explicit ask and constraint in `brief.md`: `{ "quote", "status", "evidence", "note" }`. `quote` is verbatim; `status` is `met`, `partial`, `missing`, `contradicted`, `cannot_tell` or `not_visual`. Required, and a pass without it is sent back. |
 | `evidence[].artifact` | An id from `manifest.json` that you opened, or `measurements` (then name the key in `at`) |
 | `evidence[].at` | Tile, timestamp or region, in plain words |
 | `brief_quote` | Verbatim from `brief.md`. Required for `missing` and `contradicts`; otherwise `null`. |
@@ -173,4 +175,4 @@ Field rules:
 | `keep` | What works and must survive the next revision, with evidence |
 | `prior` | Round 2 and later: one `{ "id", "status", "evidence", "note" }` entry per prior finding. Otherwise `[]`. |
 | `requests` | Captures you need to confirm a suspicion. `for` is your finding id, or `null`. |
-| `verdict` | `pass`: no blocker or major you're confident in, and every ask `met` (or `cannot_tell`, with a request). `revise`. Or `rethink`: the approach can't be patched into what was asked; say why in `summary`. |
+| `verdict` | `pass`: no blocker or major you're confident in, and every ask `met` (or `cannot_tell` with a request, or `not_visual`). `revise`: anything else that fixes can reach. `rethink`: the approach can't be patched into what was asked; say why in `summary`. |

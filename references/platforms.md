@@ -2,8 +2,12 @@
 
 Checked against vendor docs in November 2026.
 
+These tools change fast. If anything here disagrees with your installed version's `--help` or docs, trust those, and tell the user what was different.
+
 ## Contents
-- Running only on command · Cursor · The slop scout · Claude Code · Codex · Antigravity · Claude app · ChatGPT app · Chat apps: relay · Everything else: the fallback ladder These tools change fast. If anything here disagrees with your installed version's `--help` or docs, trust those, and tell the user what was different.
+Running only on command · Cursor · The slop scout · Claude Code · Codex · Antigravity · Claude app · ChatGPT app · Chat apps: relay · Everything else: the fallback ladder
+
+Read your own app's section, plus "The slop scout" when unslop mode is on. Skip the other apps.
 
 Every platform has the same three non-negotiables:
 - **A fresh critic each round.** Never a fork or anything else that inherits context.
@@ -152,22 +156,20 @@ node <skill>/scripts/critic-sandbox.mjs --runner agy --model claude-sonnet-4-6
 When the app can't start an independent agent:
 1. Capture and bundle as usual, wherever the scripts can run.
 2. Give the user `round-N/bundle/packet.md` and the `artifacts/` folder. They open a **fresh** chat with any vision model, paste the packet, attach every image, and paste the JSON reply back.
-3. Run `gate --reviewer human`. The asks list, coverage and evidence rules apply as usual.
+3. Run `gate --reviewer human`. The asks list, coverage and evidence rules apply as usual, and asks it marks `not_visual` come back to you to check.
 4. If the user won't relay, use self-review (`gate --reviewer self`, at most `SELF_PASS`) and say so plainly.
 
 ## Everything else: the fallback ladder
 
-Use the first option that works, and tell the user which one you used.
+For an app with no section above. Use the first option that works, and tell the user which one you used.
 
-1. **Native subagent, chosen model.**
-2. **Native subagent, default model.** The platform can't choose per subagent; say so.
-3. **Headless critic in a separate process**, started inside the bundle folder (the commands above, or any CLI agent that can read images). Run the gate with `--reviewer headless`.
-4. **Human relay.**
-   1. Give the user `round-N/bundle/packet.md` and the `artifacts/` folder.
-   2. They open a fresh chat with any vision-capable model, paste the packet, and attach the images.
-   3. They paste the JSON reply back to you, and you run `gate --reviewer human`.
-5. **Self-review**, last resort. You can't spawn anything and no human is available.
+1. **`critic-sandbox.mjs`**, if the doctor found the `claude` or `agy` CLI. It gates the review itself.
+2. **Native subagent, chosen model.** A fresh one, with the spawn message and nothing else.
+3. **Native subagent, default model.** The platform can't choose per subagent; say so.
+4. **Another headless critic in a separate process**, started inside the bundle folder (the `codex exec` command above, or any CLI agent that can read images). Run the gate with `--reviewer headless`.
+5. **Human relay.** The steps are in "Chat apps: relay" above.
+6. **Self-review**, last resort. You can't spawn anything and no human is available.
    1. Don't open any project file until the review is written.
    2. Read the bundle's `CRITIC.md` and follow it exactly, as if you'd never seen the project. Use only the bundle's files.
    3. Write the JSON and run `gate --reviewer self`. The best possible result is `SELF_PASS`, and your report must say the work was not independently reviewed.
-6. **No vision.** If no available model can see images, you can't judge visuals. Say so, hand over the captures, and stop.
+7. **No vision.** If no available model can see images, you can't judge visuals. Say so, hand over the captures, and stop.
