@@ -1,0 +1,17 @@
+{
+  "kind": "motion",
+  "brief": "A notification card that slides in from the left with a natural ease-out, then settles in place.",
+  "animate": 1400,
+  "selector": "#stage",
+  "viewports": "900x400",
+  "defects": [
+    {
+      "id": "linear",
+      "text": "linear|constant (speed|velocity)|even(ly)? spac|mechanical|robotic|no eas|abrupt|hard stop|uniform",
+      "criteria": [
+        "easing",
+        "timing"
+      ]
+    }
+  ]
+}

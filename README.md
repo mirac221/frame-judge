@@ -65,6 +65,20 @@ So on briefs this size, today's models mostly get it right, and frame-judge's jo
 
 **Before and after.** From round 2 on, the critic gets the previous round's frames next to the new ones for every open problem, so "fixed" is checked by comparing, not by taking the builder's word for it. The new critic also gets the list of asks earlier critics quoted, without their verdicts, and one it leaves out counts as unchecked, not as met.
 
+## New in 0.7: from "not broken" to good
+
+Catching defects only gets you to "not broken". 0.7 pushes the work up from there:
+
+- **A quality bar.** The critic scores each rubric criterion from 1 to 5. Any criterion under the bar (3 by default; `--bar 4` for "production quality") blocks the pass even when nothing is broken. The critic has to say what would raise it, in visual terms and pointing at a frame, and that becomes the fix.
+- **Pick a direction first.** Optionally, your AI builds 2 or 3 genuinely different directions, and a critic picks the strongest blind: labels are shuffled and folder names hidden, each variant is judged on its own before they're compared, and good ideas from the losers get carried over.
+- **Motion you can measure.** Animation capture now tracks every moving element frame by frame. It draws paths (dot spacing shows easing) and speed curves, so "linear easing" or "it pops at 600 ms" is a measurement, not a guess.
+- **Automatic checks, drawn on the frame.** Low text contrast, touch targets under 44 px, cut-off text and content past the screen edge are boxed on overlay images. Measured from the page; the critic decides what matters.
+- **Boxes, not vague directions.** Findings come with a box. Your AI gets it drawn on the frame and a close-up; the next critic gets a fresh close-up of the same spot.
+- **Requests that run.** When the critic asks for a closer look, `judge.mjs requests --run` re-renders that region at 3x or cuts that moment at full frame rate.
+- **A benchmark.** `bench/run.mjs` runs pages with planted problems (overflow, low contrast, a dropped ask, a banned gradient, tiny tap targets, linear easing, a one-frame jump) plus clean controls through the real pipeline, and reports what got caught and what false alarms the controls drew.
+
+Also fixed: on phone viewports, a page wider than the screen used to report 0 px of overflow and skip its lower screens, because Chrome quietly widened the layout. Now the overflow is measured against the real screen, and screens the page can't scroll to are reported.
+
 ## Run it
 
 frame-judge only runs when you call it. It stays out of your normal chats: the only thing it costs there is a one-paragraph description (about 100 tokens) telling your AI not to use it unless asked. Its instructions, scripts and critic load only on command. Type the command, then what you want built or fixed:
@@ -148,7 +162,7 @@ git clone https://github.com/mirac221/frame-judge ~/.gemini/config/skills/frame-
 mkdir -p ~/.gemini/config/agents && cp ~/.gemini/config/skills/frame-judge/agents/antigravity/frame-critic.md ~/.gemini/config/agents/
 ```
 
-**Windows PowerShell** (Claude Code shown; for other apps, `scripts/install.mjs` picks the right folders):
+**Windows PowerShell** (Claude Code shown; for other apps, `scripts/install.mjs` picks the right folders). If a clone into a deep folder fails with "Filename too long", add `-c core.longpaths=true` after `git`.
 ```powershell
 git clone https://github.com/mirac221/frame-judge "$HOME\.claude\skills\frame-judge"
 New-Item -ItemType Directory -Force "$HOME\.claude\agents" | Out-Null
@@ -182,6 +196,7 @@ SKILL.md                 the workflow your AI follows
 references/
   critic-brief.md        the critic's instructions, copied into every review
   scout-brief.md         the slop scout's instructions (unslop mode)
+  pick-brief.md          the blind pick's instructions (pick.schema.json is its answer format)
   rubric-frontend.md     layout, type, colour, responsive, states, AI-template tells
   rubric-motion.md       timing, easing, arcs, continuity, weight, walk cycles
   rubric-video.md        structure, pacing, composition, transitions, delivery
@@ -190,13 +205,17 @@ references/
   capture.md             capture options, frame-exact animation, HTML to video
   craft.md               how to build it well the first time
 scripts/
-  capture-page.mjs       screenshots per device and state, frame-exact animation to MP4
+  capture-page.mjs       screenshots per device and state, audit overlays, region close-ups, frame-exact
+                         animation to MP4 with motion paths and speed curves
   cdp.mjs                drives your installed Chrome/Edge over DevTools when Playwright isn't installed
   install.mjs            installs into every agent app on the machine; --zip for claude.ai and ChatGPT
   video-frames.mjs       contact sheets, filmstrips, motion trails, jump/stall detection, black/frozen-frame checks
-  judge.mjs              doctor, locks the request, builds the review packet, checks the verdict, every ask, and the critic's transcript
+  judge.mjs              doctor, locks the request, blind pick, builds the review packet, checks the verdict,
+                         every ask, the quality bar and the critic's transcript, turns requests into captures
   critic-guard.mjs       blocks the sandboxed critic from reading outside its review folder
   critic-sandbox.mjs     runs the critic as a separate process: locked-down claude, or audited agy
+bench/                   seeded-defect benchmark: planted problems and clean controls, run.mjs scores the critic
+tests/                   the gate and the pick with canned reviews (node --test tests/gate.test.mjs)
 agents/                  the critic for Claude Code, Cursor, Codex and Antigravity, plus Codex's command-only setting
 .claude-plugin/          Claude Code plugin files
 ```

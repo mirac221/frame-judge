@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "frame-judge blind pick",
+  "description": "What the critic returns for judge.mjs pick. Every key is required so strict structured-output modes work.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "opened",
+    "variants",
+    "ranking",
+    "winner",
+    "margin",
+    "why",
+    "decisive",
+    "carry_over"
+  ],
+  "properties": {
+    "opened": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "variants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "asks_met",
+          "asks_total",
+          "scores",
+          "strengths",
+          "weaknesses"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "asks_met": {
+            "type": "integer"
+          },
+          "asks_total": {
+            "type": "integer"
+          },
+          "scores": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "criterion",
+                "score"
+              ],
+              "properties": {
+                "criterion": {
+                  "type": "string"
+                },
+                "score": {
+                  "type": "integer",
+                  "enum": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5
+                  ]
+                }
+              }
+            }
+          },
+          "strengths": {
+            "$ref": "#/$defs/claims"
+          },
+          "weaknesses": {
+            "$ref": "#/$defs/claims"
+          }
+        }
+      }
+    },
+    "ranking": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "winner": {
+      "type": "string"
+    },
+    "margin": {
+      "type": "string",
+      "enum": [
+        "clear",
+        "slight",
+        "tie"
+      ]
+    },
+    "why": {
+      "type": "string"
+    },
+    "decisive": {
+      "$ref": "#/$defs/claims"
+    },
+    "carry_over": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "what",
+          "evidence"
+        ],
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifact",
+          "at"
+        ],
+        "properties": {
+          "artifact": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "what",
+          "evidence"
+        ],
+        "properties": {
+          "what": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    }
+  }
+}

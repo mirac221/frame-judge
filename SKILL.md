@@ -4,7 +4,7 @@ description: Command-only. Runs only when the user invokes it by name (/frame-ju
 license: Apache-2.0
 compatibility: Needs Node 18+ and ffmpeg. Page capture uses Playwright, or with Node 22+ an installed Chrome, Edge or Chromium (no install). Critic: a fresh subagent (Claude Code, Cursor, Codex, ChatGPT desktop, Antigravity) or a sandboxed claude / agy process. Chat apps (claude.ai, ChatGPT web) use relay mode.
 metadata:
-  version: "0.6.0"
+  version: "0.7.0"
 ---
 
 # frame-judge
@@ -39,9 +39,9 @@ It prints the app you're in, what can capture pages (Playwright, or your install
 | Step | What | Who |
 |---|---|---|
 | 0 | Lock the user's request, verbatim | you |
-| 0b | Ask "unsloppy?". If yes, a scout researches the AI defaults to avoid | you, the user, a scout |
-| 1 | Build | you |
-| 2 | Render and capture: screenshots, frame sheets, motion trails | scripts |
+| 0b | Ask "unsloppy?" and "pick from directions?". If yes, a scout researches the AI defaults to avoid | you, the user, a scout |
+| 1 | Build (or build 2 to 3 directions, and a blind critic picks one) | you, then a critic |
+| 2 | Render and capture: screenshots, audit overlays, frame sheets, motion paths and curves | scripts |
 | 3 | Mechanical self-check: it renders, nothing blank, no runtime errors | you |
 | 4 | Bundle a code-free review packet | script |
 | 5 | Ask which model the critic runs on, if the platform allows it (once) | you, then the user |
@@ -64,6 +64,7 @@ Use `--brief "..."` for inline text, or `--brief-file -` to read stdin.
 - **Reference images** the user gave you: add `--ref mock.png` (repeatable) so the critic can compare against them.
 - **`--kind`** picks the rubrics: `frontend` for pages and UI, `motion` for any animation, `video` for clips and edits. Leave it out to auto-detect from the captures.
 - **`--critic-model`** if the user already named one.
+- **`--bar`**, the quality bar, from 1 (off) to 5. Default `3`: every rubric criterion the critic scores must reach "acceptable", or it becomes a must-fix. Use `--bar 4` when the user asks for production quality, "polished", "professional" or similar: then "not broken" isn't enough, and every criterion has to reach what a picky senior designer would defend. Change it later with `judge.mjs set bar N`.
 
 This creates `.frame-judge/` (it git-ignores itself) with `brief.md` and `ledger.json`. The ledger survives context compaction. If you lose track, run `judge.mjs status`.
 
@@ -73,7 +74,13 @@ Ask the user once, in these words:
 
 > Do you want it unsloppy? (experimental: may decrease quality and will spend more tokens)
 
-On Claude Code, ask with AskUserQuestion, and put the critic-model question from step 5 in the same prompt, so the user is interrupted once and step 5 is already done when you get there. Elsewhere, ask both in one chat message. Skip whichever the user already answered.
+When the brief leaves the design open (a landing page, a hero, a logo animation, "make it look good"), also ask:
+
+> Want me to build 2 or 3 different directions first and have a blind critic pick the strongest? (more tokens, usually a better starting point)
+
+Skip that question when the user specified the design or gave reference images, or for a fix to existing work.
+
+On Claude Code, ask with AskUserQuestion, and put the critic-model question from step 5 in the same prompt, so the user is interrupted once and step 5 is already done when you get there. Elsewhere, ask them all in one chat message. Skip whichever the user already answered.
 
 - **No:** carry on. Unslop is off by default.
 - **Yes:**
@@ -96,6 +103,15 @@ Before building, read the section of [references/craft.md](references/craft.md) 
 
 For anything animated, make time an explicit input: a timeline you can seek, or a `window.frameJudgeSeek(ms)` hook. That makes capture frame-exact, and it turns HTML into video for free.
 
+### Directions first: the blind pick (if the user said yes)
+
+The first idea anchors everything after it, and polishing the wrong direction for three rounds wastes them. So:
+1. Build 2 or 3 **genuinely different** directions (layout, type, color or motion concept: not one design in three colors), each in its own folder or file.
+2. Capture each one the same way, with fewer images than a full round: one viewport set (`--viewports desktop,mobile --slices 2`), or one motion capture each.
+3. `node <skill>/scripts/judge.mjs pick --variant .frame-judge/cap/dir-a --variant .frame-judge/cap/dir-b [--variant ...]` builds a blind bundle: labels are shuffled, and folder names never reach the critic.
+4. Run the critic exactly as in step 6, on the pick: `critic-sandbox.mjs --pick`, or a fresh subagent with the message `pick` printed. Gate it with `judge.mjs pick-gate --review .frame-judge/pick/pick.json` (add `--transcript auto` on Claude Code).
+5. Build on the winner, fold in its `carry_over` items, and delete or set aside the others. Then the normal loop starts at step 2. A `tie` goes to the user.
+
 ## 2. Render and capture
 
 **Pages and UI.** This uses Playwright if it's installed. Otherwise, with Node 22+, it drives the Chrome, Edge or Chromium already on the machine over DevTools, with nothing to install. Setup and options: [references/capture.md](references/capture.md).
@@ -108,10 +124,13 @@ Defaults are desktop 1440×900, tablet 768×1024 and mobile 390×844, captured s
 - `--reduced-motion`
 - local files work as well as URLs
 
+Each screen is also **audited** from the live page: text contrast below WCAG AA, touch targets under 44×44 px on touch viewports, text cut off by its container, and elements sticking out past the viewport edge. Screens with hits get an `audit-*` overlay image with the boxes drawn on; the critic decides which matter. The selectors behind each box are in `capture.json` under `builder_only.audit`, for you. `--no-audit` turns it off.
+
 **Animation on a page.** This is frame-exact (fake clock plus Web Animations seeking) and encodes to MP4:
 ```bash
 node <skill>/scripts/capture-page.mjs scene.html --out .frame-judge/cap/anim --animate 3000 --fps 30 --selector "#hero"
 ```
+It also **measures motion**: every frame, it records the box and opacity of the elements that move (`--track auto`, the default, picks up to 4; or `--track "#robot,.leg-left"`), then draws `motion-paths.png` (each element's path, one dot per frame, so spacing shows easing) and `motion-curves.png` (distance, speed, opacity and scale over time). Easing and pops stop being a guess from filmstrips. Canvas and WebGL motion isn't tracked; for that, rely on the strips.
 
 **Any video**, including that MP4:
 ```bash
@@ -133,17 +152,19 @@ Capture what the user will experience: every viewport they'd use, the states tha
 Before you spend a critic round, check and fix the binary stuff:
 - it renders
 - no blank or black frames
-- nothing in `builder_only` in each `capture.json` (console errors, failed requests)
+- nothing in `builder_only` in each `capture.json` (console errors, failed requests, screens that couldn't be reached)
 - the right duration and size
-- `horizontal_overflow_px` and `broken_images` are zero
+- `horizontal_overflow_px` and `broken_images` are zero, and no `unreachable_screens`
+- the `audit` counts: fix what's plainly a bug (body text at 2:1 contrast, a nav of 18 px icons) before the critic sees it. Leave judgment calls to the critic.
 
 That's the whole list. You don't get to decide it looks good and skip the critic.
 
 ## 4. Bundle
 
 ```bash
-node <skill>/scripts/judge.mjs bundle .frame-judge/cap/page .frame-judge/cap/anim-views
+node <skill>/scripts/judge.mjs bundle .frame-judge/cap/page .frame-judge/cap/anim .frame-judge/cap/anim-views
 ```
+Pass the animation capture folder too (`cap/anim`): that's where the motion paths and curves are.
 
 This writes `.frame-judge/round-N/bundle/`. It holds only visual files (png, jpg, webp, gif, plus video if you pass `--include-video`) and these text files:
 - `brief.md`, with code blocks stripped
@@ -151,6 +172,7 @@ This writes `.frame-judge/round-N/bundle/`. It holds only visual files (png, jpg
 - `CRITIC.md`, the critic's instructions
 - `manifest.json`, with citable artifact IDs
 - `prior.json`, from round 2 on: open findings *without* your "fixed" claims, so the critic checks for itself
+- from round 2 on, `zoom-*` close-ups: where an open finding boxed a region, the same region of this round's capture, enlarged
 
 The script won't open a new round while must-fix findings are unanswered, or past the round cap. It prints the exact message to send the critic.
 
@@ -198,6 +220,8 @@ The gate decides, not the critic's mood and not you. It:
 - **Rejects** findings that cite artifact IDs that don't exist or that the critic never opened, findings with no evidence, brief quotes that aren't in the brief, and bad severity or confidence values.
 - **Checks coverage:** a pass only counts if the critic opened every image, verified from its transcript where one exists, otherwise from its own `opened` list.
 - **Checks the brief, ask by ask:** the critic must list every explicit ask and constraint in the brief, quoted verbatim and marked `met`, `partial`, `missing`, `contradicted` or `cannot_tell`, with evidence. Quotes that aren't in the brief are dropped. An unmet ask without its own finding becomes a must-fix; a `cannot_tell` ask becomes a verify item (capture it). A pass without this list is sent back. From round 2 on, an ask an earlier critic listed and this one left out counts as `cannot_tell`, not as met.
+- **Holds the quality bar:** any rubric criterion scored below the bar (default 3, see step 0) becomes a must-fix **lift**, `R1-L1`, even when nothing is broken. Its fix is the critic's own `elevate` entry for that criterion: what would raise it, in visual terms, with a boxed frame. A lift resolves itself once a later critic scores that criterion at the bar. Elevate entries for criteria already at the bar are printed as optional upgrades.
+- **Draws the findings for you:** every finding the critic boxed is drawn onto a copy of its frame, plus an enlarged crop, in `round-N/annotated/`. The gate prints the paths under each finding. Look at them before you fix: "the nav icons" is vague, a red box isn't.
 - **Hands back what pixels can't show:** asks the critic marks `not_visual` ("no frameworks", "one HTML file", "loads in under a second") are listed for you. No critic checked them. Check each one yourself, with a command or by reading the file, before you report.
 - **Checks isolation:** with a transcript, any read outside the bundle voids the review (`RERUN_CRITIC`).
 - **Sorts** the rest:
@@ -210,7 +234,7 @@ The gate decides, not the critic's mood and not you. It:
 
 | Decision | Meaning | You |
 |---|---|---|
-| `PASS` | No must-fix left, nothing from the brief missing | Report (step 9) |
+| `PASS` | No must-fix left, nothing from the brief missing, every scored criterion at the bar | Report (step 9) |
 | `SELF_PASS` | Same, but from a self-review fallback | Report, and say it wasn't independent |
 | `REVISE` | Must-fix items exist | Step 8, then a new round |
 | `RETHINK` | Critic says the approach is wrong at the root | Tell the user before rebuilding |
@@ -230,7 +254,8 @@ node <skill>/scripts/judge.mjs respond R1-F6 wont-fix "user asked for this gradi
 - **`disputed`** needs **visual** evidence, such as a crop or extra frames. It goes into the next bundle and the next critic rules on it. "The CSS says 16px" is not evidence; pixels are.
 - **`wont-fix`** needs a verbatim quote from the brief that the fix would violate.
 - **Fix causes, not captures.** Never change the capture to dodge a finding: no cropping out the broken footer, dropping the mobile viewport, or trimming the clip.
-- **Verify items and critic `requests`:** capture that spot closer (an action with `clip`, a denser `--motion` window) so the next critic can confirm or kill them.
+- **Verify items and critic `requests`:** run `judge.mjs requests`. It turns each one into a capture command: a re-render of the boxed region at 3x (`capture-page --zoom`), a full-frame-rate strip of a time window, or another viewport. `--run` runs them. Add the folders it prints to the next `bundle`, next to your full recapture. A request it can't turn into a command (a state shot) tells you what to add to your actions file.
+- **Lifts:** they're how "fine" becomes "good". Apply the critic's elevate change, not a token tweak; the next critic re-scores the criterion from scratch.
 - **Don't regress** what the critic listed under `keep`.
 - **Polish and nits:** fix polish if it's cheap. Ignore nits unless they're trivial.
 
@@ -243,6 +268,7 @@ Lead with the verdict. `judge.mjs status` prints the block for you:
 ```
 Critic: PASS on round 2 of 3 (subagent, model sonnet, code-blind)
 Brief: 6 of 6 explicit asks met, each checked by the critic against the captures
+Scores (critic, bar 4/5): layout 3→4 · typography 4 · motion 2→4
 Round 1 gut reaction: "The legs scissor like a broken folding chair."
 Fixed: R1-F1 foot sliding · R1-F2 hero text clipped at 390px · R1-F5 unrequested testimonials removed
 Open: R2-F3 (minor) nav icon sits 2px low
@@ -271,7 +297,9 @@ Step 6 covers the normal cases: the sandbox, then a subagent. When neither exist
 | [references/craft.md](references/craft.md) | Before building (the section for your medium) |
 | [references/capture.md](references/capture.md) | Capture setup, states files, frame-exact animation, HTML to video, ffmpeg recipes |
 | [references/platforms.md](references/platforms.md) | Spawning the critic, the model question and fallbacks, per platform |
-| `scripts/judge.mjs` | doctor, init, brief, set, scout, avoid, bundle, gate, respond, status |
+| `scripts/judge.mjs` | doctor, init, brief, set, scout, avoid, pick, pick-gate, bundle, gate, requests, respond, status |
+| [references/pick-brief.md](references/pick-brief.md), `references/pick.schema.json` | The blind pick's instructions and output format. The critic reads them itself. |
+| `bench/run.mjs` (repo only, not installed) | Seeded-defect benchmark: known planted problems plus clean controls, through the real pipeline. Measures what the critic catches. |
 | `scripts/capture-page.mjs`, `scripts/cdp.mjs` | Page capture: Playwright, or an installed Chrome/Edge over DevTools |
 | `scripts/critic-sandbox.mjs`, `scripts/critic-guard.mjs` | The sandboxed critic (claude or agy), and the guard pinned to the claude critic |
 | `scripts/install.mjs` | Installs the skill and critic agents for every app on the machine; `--zip` builds the chat-app upload |

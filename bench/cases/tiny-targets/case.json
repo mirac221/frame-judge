@@ -1,0 +1,17 @@
+{
+  "kind": "frontend",
+  "brief": "A mobile-friendly recipe app home screen with a search field, a few recipe cards and a bottom navigation bar that is easy to tap.",
+  "viewports": "mobile,tablet",
+  "defects": [
+    {
+      "id": "small-targets",
+      "text": "tap|touch|target|tiny|too small|small icons|hard to hit|cramped|unlabel",
+      "criteria": [
+        "interaction",
+        "responsive",
+        "states",
+        "layout"
+      ]
+    }
+  ]
+}

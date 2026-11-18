@@ -29,7 +29,7 @@ const file = key(path.resolve(event.cwd || process.cwd(), String(target)));
 if (bundleArg) {
   const root = key(path.resolve(bundleArg)).replace(/\/+$/, '');
   if (!file.startsWith(`${root}/`)) deny(`${target} is outside the bundle`);
-} else if (!/\/\.frame-judge\/round-\d+\/bundle\//.test(file)) {
+} else if (!/\/\.frame-judge\/(round-\d+|pick)\/bundle\//.test(file)) {
   deny(`${target} is outside a .frame-judge review bundle`);
 }
 process.exit(0);

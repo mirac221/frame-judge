@@ -1,0 +1,14 @@
+{
+  "kind": "frontend",
+  "brief": "A simple product page for a coffee grinder: dark header, a product photo area, a price and a buy button. It has to work well on phones.",
+  "defects": [
+    {
+      "id": "mobile-overflow",
+      "text": "overflow|horizontal|sideways|wider than|off[- ]?screen|cut off|past the (right )?edge|spills|clipped|cropped",
+      "criteria": [
+        "responsive",
+        "layout"
+      ]
+    }
+  ]
+}

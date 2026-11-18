@@ -70,7 +70,7 @@ const APPS = {
 };
 
 // Left out of installs and zips: repo plumbing an agent never needs, and that would only add files to wade through.
-const SKIP = new Set(['.git', '.github', 'node_modules', 'dist', 'evals', 'tests', '.frame-judge', '.assumption-judge', '.DS_Store']);
+const SKIP = new Set(['.git', '.github', 'node_modules', 'dist', 'evals', 'tests', 'bench', '.frame-judge', '.assumption-judge', '.DS_Store']);
 function copyDir(from, to) {
   fs.mkdirSync(to, { recursive: true });
   for (const e of fs.readdirSync(from, { withFileTypes: true })) {

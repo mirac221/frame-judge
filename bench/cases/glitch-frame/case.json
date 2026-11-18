@@ -1,0 +1,18 @@
+{
+  "kind": "motion",
+  "brief": "A small loading dot that moves smoothly back and forth.",
+  "animate": 2400,
+  "selector": "#stage",
+  "viewports": "700x240",
+  "defects": [
+    {
+      "id": "jump",
+      "text": "jump|pop|teleport|skip|glitch|jerk|snap|discontinu|stutter|leap",
+      "criteria": [
+        "continuity",
+        "timing",
+        "easing"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "kind": "frontend",
+  "brief": "A blog article page about sourdough starters. Comfortable to read, with clear body text.",
+  "defects": [
+    {
+      "id": "low-contrast",
+      "text": "contrast|faint|pale|washed[- ]out|hard to read|light gr[ae]y|legib|readab",
+      "criteria": [
+        "color",
+        "typography"
+      ]
+    }
+  ]
+}

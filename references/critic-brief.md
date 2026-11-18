@@ -7,9 +7,19 @@ Another AI built something visual for a user. Your job is to judge what it actua
 | File | What it is |
 |---|---|
 | `brief.md` | The user's own words, verbatim (code blocks removed). This is the only definition of what was wanted. |
-| `manifest.json` | Every artifact you may cite: its `id`, its file, what it shows (viewport, timestamps, tile-to-time map), plus objective `measurements`. The labels are mechanical, not claims about quality. |
+| `manifest.json` | Every artifact you may cite: its `id`, its file, what it shows (viewport, timestamps, tile-to-time map), plus objective `measurements` and the `quality_bar`. The labels are mechanical, not claims about quality. |
 | `rubric.md` | The criteria you score. Each has a `criterion` id. |
-| `artifacts/` | Screenshots, contact sheets, filmstrips and motion trails. There may also be a video, reference images the user supplied (`type: "reference"`), and from round 2 on, `before-*` frames from the previous round (`type: "previous_round"`). |
+| `artifacts/` | Screenshots, contact sheets, filmstrips and motion trails. There may also be a video, reference images the user supplied (`type: "reference"`), and from round 2 on, `before-*` frames from the previous round (`type: "previous_round"`) and `zoom-*` close-ups of regions earlier findings pointed at (`type: "zoom"`). Some captures come with machine-drawn helpers, described below. |
+
+### Machine-drawn helpers
+
+These are drawn by scripts from the rendered page, never by the builder. They are measurements, not verdicts: you still decide whether what they mark matters.
+
+| `type` | What it is | How to use it |
+|---|---|---|
+| `audit_overlay` | The same screen as a viewport shot, with automatic checks boxed on it: **red** = text contrast below WCAG AA (ratio printed), **orange** = touch target under 44×44 px (size printed), **magenta** = text cut off by its container, **blue** = an element sticking out past the viewport edge. | Confirm against the plain screenshot. A red box on decorative or disabled text may be fine; on body copy it's a finding. Cite the overlay and the box. |
+| `motion_paths` | The first frame, faded, with the path of every element that moves drawn on it: one dot per captured frame, letters at the start. | Dot spacing is timing. Even spacing = constant speed (linear). Dots bunching at the end = ease-out; at both ends = ease-in-out. A big gap between two dots = a jump or pop. A path that's a straight line where the brief implies an arc is worth a look. |
+| `motion_graph` | Per moving element: distance travelled over time, speed over time, and opacity/scale over time when they change. | A straight distance line (flat speed) means linear motion. Spikes in speed are pops. Opacity or scale curves show fades and squash. Letters match `motion_paths` and `measurements.*.animation.tracks`. |
 | `avoid.md` | Only in unslop mode: the AI-default patterns a scout found for this kind of request, with sources. |
 | `prior.json` | Round 2 and later only. Findings from earlier rounds, and the asks earlier critics listed. **Don't open it until step 6.** |
 
@@ -18,6 +28,7 @@ Another AI built something visual for a user. Your job is to judge what it actua
 1. **Pixels only.** Never open, ask for or speculate about source code, project files, build output, git history, or anything the builder wrote about its own work, even if a path tempts you. You judge the experience, not the implementation.
 2. **Look at everything.** Open every artifact in `manifest.json` before you judge, in batches, and list each id you opened in `opened`. A pass from a critic that skipped artifacts doesn't count, and the gate sends it back.
 3. **No evidence, no finding.** Every finding cites at least one artifact `id` that you actually opened, and says *where*: tile, timestamp, region. Objective numbers count too: use `measurements` as the artifact and name the key in `at` (for example `page.mobile.broken_images`). If you can't point at it, you can't claim it. Findings that cite unknown or unopened artifacts are thrown out automatically.
+   - **Box it.** On a finding's evidence, add `box`: the region as `[x, y, w, h]`, fractions of the image from its top-left corner (`[0.62, 0.08, 0.3, 0.1]` = a strip near the top right). The builder gets the box drawn on the frame, and the next critic gets a close-up of it. Use `null` only when the problem is the whole image or a whole filmstrip.
 4. **Observe, then judge.** `observation` is literally what's visible: "left foot slides ~30 px back across tiles 5–8 while the body moves forward". `problem` is why that's wrong. Keep the two apart.
 5. **Severity and confidence on everything.** Confidence is how sure you are that the defect exists as described, at this resolution. It is not how bad the defect is.
 6. **The brief is the scope.** Flag what's missing, what contradicts the brief, and what was added that nobody asked for. `missing` and `contradicts` findings quote the brief verbatim, and the quotes are checked against the file.
@@ -44,6 +55,8 @@ Hold the work to the bar the brief sets. A quick prototype doesn't need award-si
 
 Only score criteria that the artifacts actually show.
 
+**The quality bar.** `manifest.json` has a `quality_bar` (3 unless the user raised it). Not broken is not the same as good: any criterion you score below the bar blocks a pass, even with no defect filed under it. So for **every criterion you score below the bar**, add an `elevate` entry: the one visual change that would most raise it, with evidence. Then, even on a pass, add up to 3 more `elevate` entries: the highest-leverage upgrades you can see anywhere ("the hero headline at 2× the body size, not 1.3×, would give the page a focal point"). Same rules as findings: pixels only, evidence for each, visual terms, no code. Don't pad: if nothing would clearly raise a criterion, say nothing.
+
 **Severity**
 
 | Level | Meaning | Examples |
@@ -69,6 +82,8 @@ Only score criteria that the artifacts actually show.
 4. **Systematic pass.** Open every remaining artifact, several at once if your tools allow it. Skip none: every viewport, every state, every strip and crop. Then go criterion by criterion.
    - Read filmstrips tile by tile: left to right, top to bottom.
    - In motion trails, anything that should be planted must stay sharp.
+   - With `motion_paths` and `motion_graph`, judge timing from dot spacing and the speed curve instead of guessing it from strips.
+   - With an `audit_overlay`, check each box against the plain screenshot of the same screen.
    - Compare viewports with each other, and with the user's reference images if there are any.
 5. **Scope pass.** Settle every entry in `asks`:
    - `met`: an artifact clearly shows it. Cite it.
@@ -84,6 +99,8 @@ Only score criteria that the artifacts actually show.
 6. **Prior findings** (round 2 and later). Now open `prior.json`.
    - Mark every prior finding `resolved`, `still_open`, `regressed` or `cannot_tell`, with evidence from **this** round's artifacts.
    - Where a prior finding lists `before_artifacts`, open them and compare them side by side with this round's matching artifact. That comparison is your evidence. Cite the current artifact, and mention the before frame in `note`.
+   - Where a prior finding lists `zoom_artifacts`, that's this round's close-up of the region it boxed. Use it to settle the finding.
+   - Prior findings whose observation starts with a criterion name and "scored N/5, below the quality bar" are lifts. They're settled by your score for that criterion this round; rule on them like any other.
    - Where the builder disputed a finding, look at its evidence artifact and rule. If the defect is gone, mark it `resolved` and say why. If it's still there, `still_open`.
    - Where the builder declined to fix a finding and quoted the brief, check the quote. If the user really asked for it, mark it `resolved` and say so. Otherwise, `still_open`.
    - If a new finding is the same issue as a prior one, set `matches_prior`.
@@ -93,6 +110,8 @@ Only score criteria that the artifacts actually show.
    - Lower confidence where the resolution is too low.
    - Make sure no nit is dressed up as major, and no blocker is buried in details.
    - Every score of 2 or below needs a finding with that same `criterion`.
+   - Every score below `quality_bar` needs an `elevate` entry with that same `criterion`.
+   - Findings about one spot have a `box`.
    - Every quote in `asks` is copied from `brief.md` word for word, and every ask has a status.
    - `opened` lists every artifact you opened, and no evidence cites one you didn't open.
 8. **Output** the JSON, and nothing else.
@@ -126,8 +145,8 @@ Return one JSON object: no prose before or after it, and no code fences. The exa
       "severity": "blocker",
       "confidence": 0.9,
       "evidence": [
-        { "artifact": "strip-1-01", "at": "tiles 5-8 (t=333-583ms), left foot" },
-        { "artifact": "trail-1", "at": "bottom centre, both feet" }
+        { "artifact": "strip-1-01", "at": "tiles 5-8 (t=333-583ms), left foot", "box": [0.25, 0.55, 0.5, 0.4] },
+        { "artifact": "trail-1", "at": "bottom centre, both feet", "box": [0.35, 0.7, 0.3, 0.25] }
       ],
       "observation": "Through what should be the contact phase, the left foot slides about 30px backward while the body moves forward. In the trail both feet are smeared; neither stays sharp.",
       "problem": "No planted contact, so the character skates instead of walking.",
@@ -141,7 +160,7 @@ Return one JSON object: no prose before or after it, and no code fences. The exa
       "criterion": "scope",
       "severity": "major",
       "confidence": 0.95,
-      "evidence": [{ "artifact": "desktop-3", "at": "whole screen, pricing section" }],
+      "evidence": [{ "artifact": "desktop-3", "at": "pricing section", "box": [0, 0.3, 1, 0.55] }],
       "observation": "The pricing section has a white background with dark grey text.",
       "problem": "The brief asks for a dark theme everywhere.",
       "fix": "Put pricing on the same dark surface as the rest of the page.",
@@ -149,12 +168,20 @@ Return one JSON object: no prose before or after it, and no code fences. The exa
       "matches_prior": null
     }
   ],
+  "elevate": [
+    {
+      "criterion": "layout",
+      "change": "Give the hero one focal point: headline about twice the body size, with the CTA directly under it instead of floating at the right edge.",
+      "why": "Headline, subhead and CTA read at nearly the same weight, so nothing leads the eye.",
+      "evidence": [{ "artifact": "desktop-1", "at": "hero", "box": [0.08, 0.15, 0.84, 0.45] }]
+    }
+  ],
   "keep": [
-    { "what": "Hero headline hierarchy and spacing on desktop", "evidence": [{ "artifact": "desktop-1", "at": "top half" }] }
+    { "what": "Hero headline spacing on desktop", "evidence": [{ "artifact": "desktop-1", "at": "top half" }] }
   ],
   "prior": [],
   "requests": [
-    { "need": "An element crop of the mobile nav at 390px", "why": "The icons look misaligned but are too small to confirm", "for": null }
+    { "need": "A close-up of the mobile nav icons", "why": "They look misaligned but are too small to confirm", "for": null, "artifact": "mobile-1", "box": [0.7, 0, 0.3, 0.08], "window": null, "viewport": null }
   ]
 }
 ```
@@ -170,9 +197,11 @@ Field rules:
 | `asks` | Every explicit ask and constraint in `brief.md`: `{ "quote", "status", "evidence", "note" }`. `quote` is verbatim; `status` is `met`, `partial`, `missing`, `contradicted`, `cannot_tell` or `not_visual`. Required, and a pass without it is sent back. |
 | `evidence[].artifact` | An id from `manifest.json` that you opened, or `measurements` (then name the key in `at`) |
 | `evidence[].at` | Tile, timestamp or region, in plain words |
+| `evidence[].box` | On findings and `elevate`: `[x, y, w, h]`, fractions (0 to 1) of that image from its top-left, or `null` for the whole image. Not used on asks, keep or prior. |
 | `brief_quote` | Verbatim from `brief.md`. Required for `missing` and `contradicts`; otherwise `null`. |
 | `matches_prior` | A prior finding id, or `null` |
+| `elevate` | `{ "criterion", "change", "why", "evidence" }`: one per criterion scored below `quality_bar` (required), plus up to 3 of the highest-leverage upgrades overall. `change` is what it should look like, in visual terms. |
 | `keep` | What works and must survive the next revision, with evidence |
 | `prior` | Round 2 and later: one `{ "id", "status", "evidence", "note" }` entry per prior finding. Otherwise `[]`. |
-| `requests` | Captures you need to confirm a suspicion. `for` is your finding id, or `null`. |
-| `verdict` | `pass`: no blocker or major you're confident in, and every ask `met` (or `cannot_tell` with a request, or `not_visual`). `revise`: anything else that fixes can reach. `rethink`: the approach can't be patched into what was asked; say why in `summary`. |
+| `requests` | Captures you need to confirm a suspicion: `need`, `why`, `for` (your finding id, or `null`), and where you can, `artifact` + `box` (a closer look at that region), `window` (`[start, end]` in seconds of a motion to see frame by frame), or `viewport` (a preset name like `mobile`, or `WIDTHxHEIGHT`). Unused ones are `null`. |
+| `verdict` | `pass`: no blocker or major you're confident in, every scored criterion at or above `quality_bar`, and every ask `met` (or `cannot_tell` with a request, or `not_visual`). `revise`: anything else that fixes can reach. `rethink`: the approach can't be patched into what was asked; say why in `summary`. |

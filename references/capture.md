@@ -31,8 +31,25 @@ node <skill>/scripts/capture-page.mjs <url|file.html> --out <dir> [options]
 | `--live-animations` | off | By default, screenshots fast-forward finite CSS animations and transitions to their end state, so layout is judged settled. This flag keeps them running. |
 | `--channel chrome\|msedge` | bundled | Use an installed browser |
 | `--dpr N` | per preset | Override the device pixel ratio for every viewport |
+| `--no-audit` | audit on | Skip the automatic checks below |
+| `--zoom "VP@Y:x,y,w,h"` | none | Instead of normal screens, re-render one region at `--zoom-dpr` (default 3): viewport `VP` (a preset or `WxH`), scrolled to `Y`, box in fractions of the screen. Repeatable. `judge.mjs requests` writes these from the critic's boxed requests. |
 
-The output dir gets one PNG per artifact plus `capture.json`. That file holds artifact ids, mechanical descriptions and measurements (`page_height_px`, `screens`, `horizontal_overflow_px`, `broken_images`). It also has a `builder_only` block with console errors, page errors and failed requests. Those are for you, and the bundle never copies them.
+The output dir gets one PNG per artifact plus `capture.json`. That file holds artifact ids, mechanical descriptions and measurements (`page_height_px`, `screens`, `horizontal_overflow_px`, `broken_images`, `audit`, and `unreachable_screens` when the page couldn't be scrolled that far). It also has a `builder_only` block with console errors, page errors, failed requests, and the audit hits with their selectors. Those are for you, and the bundle never copies them.
+
+Slicing and overflow use the emulated screen size. On a mobile viewport, content wider than the screen makes Chrome widen and lengthen the layout viewport; the overflow is then reported in `horizontal_overflow_px`, and screens the page can't scroll to are reported instead of silently skipped.
+
+### The audit
+
+On every captured screen, the page itself is checked:
+
+| Check | Rule | Overlay color |
+|---|---|---|
+| Text contrast | WCAG AA: 4.5:1, or 3:1 for text ≥ 24 px (≥ 18.66 px bold). Measured against what is painted behind the text; text over images, gradients, video or canvas is skipped, not guessed. | red, ratio shown |
+| Touch targets | Touch viewports only: links, buttons and inputs under 44×44 px. Links inside a sentence are exempt (WCAG 2.5.8). | orange, size shown |
+| Cut-off text | Text that runs past an ancestor that clips its overflow, or is truncated with an ellipsis | magenta |
+| Past the edge | The outermost element sticking out past the right edge of the screen | blue, overshoot shown |
+
+Screens with hits get an `audit-<id>.png` overlay (up to 3 per viewport); counts cover every screen. The overlay is labelled as an overlay, so the critic won't mistake it for the design.
 
 ### Actions file (states)
 
@@ -67,6 +84,14 @@ How it works:
 3. If the page defines `window.frameJudgeSeek(ms)`, that hook is called instead of the Web Animations seek. Your page owns its timeline then, so seek everything yourself. This is the most reliable route for animations you write.
 4. Frames land in `<dir>/frames/` and get encoded to `<dir>/animation.mp4` (H.264, yuv420p, CRF 16). Use `--encode path.mp4` to choose the file.
 5. Then cut views for the critic: `video-frames.mjs <dir>/animation.mp4 --out <dir>/views --as motion`.
+
+6. **Motion tracking** (`--track`, default `auto`): after each frame, the box, opacity and visibility of up to 400 elements (inside `--selector`, or the whole page) are measured. The ones that really move, fade or resize are kept, up to 4. Children that just ride along with a moving parent are merged into it. Each gets a letter, and you get:
+   - `motion-paths.png`: the last frame, faded, with each path drawn as one dot per frame and a ring every 500 ms. Dot spacing is timing.
+   - `motion-curves.png`: distance from the start, speed, opacity and scale over time, per element.
+   - `measurements.animation.tracks`: path length, peak speed, `constant_speed_share` (near 1 means linear), `jumps_at_ms` (single-frame leaps), opacity and scale ranges.
+   - `builder_only.tracks`: which selector each letter is.
+
+   `--track "#robot,.leg-left"` tracks exactly those; `--track none` turns it off. Canvas, WebGL and video content isn't tracked.
 
 Notes:
 - **`--selector`** fixes a clip around the element's box at t=0, plus `--pad` pixels, so every frame is the same size. Make the pad big enough for the element's motion.

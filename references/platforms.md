@@ -80,6 +80,7 @@ node <skill>/scripts/critic-sandbox.mjs --model sonnet
 - It runs `claude -p` there with only the `Read` tool, no MCP servers, and the guard hook pinned to that copy.
 - It records the critic's tool calls, then gates the review with that transcript and deletes the copy.
 - It uses your Claude plan. It doesn't work with `--bare`, which skips the login.
+- `--pick` runs the blind pick (`judge.mjs pick`) the same way and gates it with `pick-gate`. It works with `--runner agy` too, everywhere this file mentions the sandbox. For a subagent instead, send the message `pick` printed; the critic agents know to read `PICK.md` then.
 
 ## Codex (CLI, IDE extension, app)
 

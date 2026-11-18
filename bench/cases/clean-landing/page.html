@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rye & Co. bakery</title><style>
+*{box-sizing:border-box}body{margin:0;font:17px/1.6 Georgia,'Times New Roman',serif;color:#1d1d1f;background:#fbfaf7}
+.hero{padding:88px 7vw 72px;background:#f4e6d4;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:56px;align-items:center}
+.hero .shot{aspect-ratio:4/5;border-radius:10px;background:#c8956a}
+@media (max-width:760px){.hero{grid-template-columns:1fr;gap:36px;padding-top:64px}.hero .shot{aspect-ratio:4/3}}
+.hero h1{font-size:clamp(40px,7vw,72px);line-height:1;margin:0 0 16px;color:#3b2414;letter-spacing:-.01em}
+.hero p{font-size:20px;max-width:34ch;margin:0 0 28px;color:#4a3324}
+.cta{display:inline-block;background:#3b2414;color:#fff8ef;padding:14px 26px;border-radius:6px;font:600 16px system-ui;text-decoration:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:28px;padding:72px 7vw}
+.card h3{margin:14px 0 4px;font-size:22px;color:#3b2414}.card p{margin:0;color:#4a3324;font-size:16px}
+.card .img{aspect-ratio:5/4;border-radius:8px}
+footer{background:#3b2414;color:#f4e6d4;padding:48px 7vw;font:16px/1.7 system-ui;display:flex;flex-wrap:wrap;gap:48px}
+footer b{display:block;color:#fff8ef;margin-bottom:4px}
+</style></head><body>
+<div class="hero"><div><h1>Bread worth<br>getting up for</h1><p>Slow-fermented loaves and buttery pastries, baked every morning on Alder Street.</p><a class="cta" href="#">See today's bake</a></div><div class="shot"></div></div>
+<div class="grid">
+  <div class="card"><div class="img" style="background:#c8a07a"></div><h3>Country rye</h3><p>A tangy, open-crumbed loaf with a deep crust.</p></div>
+  <div class="card"><div class="img" style="background:#e3b97f"></div><h3>Cardamom buns</h3><p>Knotted, sticky, and gone by eleven.</p></div>
+  <div class="card"><div class="img" style="background:#b98a5e"></div><h3>Seeded spelt</h3><p>Sunflower, flax and pumpkin seeds in every slice.</p></div>
+</div>
+<footer><div><b>Rye &amp; Co.</b>14 Alder Street, Leeds</div><div><b>Open</b>Tue–Sat 7:00–15:00<br>Sun 8:00–13:00</div></footer>
+</body></html>

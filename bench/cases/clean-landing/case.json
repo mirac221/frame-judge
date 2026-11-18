@@ -1,0 +1,6 @@
+{
+  "kind": "frontend",
+  "brief": "A landing page for a small bakery with a warm hero, three product cards and a footer with the address and opening hours. Use solid color blocks as stand-ins for the photos; the real photos come later.",
+  "control": true,
+  "defects": []
+}

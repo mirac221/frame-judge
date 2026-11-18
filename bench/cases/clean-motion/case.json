@@ -1,0 +1,9 @@
+{
+  "kind": "motion",
+  "brief": "A call-to-action button that gently pulses to draw attention, without being annoying.",
+  "animate": 2600,
+  "selector": "#stage",
+  "viewports": "700x300",
+  "control": true,
+  "defects": []
+}

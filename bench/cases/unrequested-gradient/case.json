@@ -1,0 +1,14 @@
+{
+  "kind": "frontend",
+  "brief": "A minimal portfolio homepage for a product designer. Flat colors only, no gradients.",
+  "defects": [
+    {
+      "id": "gradient",
+      "text": "gradient",
+      "kinds": [
+        "contradicts",
+        "missing"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "kind": "frontend",
+  "brief": "A landing page for a yoga studio with a calm hero, a weekly class schedule table, and a footer with three links: About, Pricing, Contact.",
+  "defects": [
+    {
+      "id": "no-footer",
+      "text": "footer|about.*pricing|pricing.*contact|three links",
+      "kinds": [
+        "missing",
+        "contradicts"
+      ]
+    }
+  ]
+}

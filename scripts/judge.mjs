@@ -2,19 +2,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HELP = `judge.mjs <command> [options]   (state lives in ./.frame-judge, or --dir / FRAME_JUDGE_DIR)
 
   init     --brief "..." | --brief-file <file|->  [--kind frontend,motion,video] [--ref image]...
-           [--max-rounds 3] [--min-confidence 0.6] [--critic-model alias] [--unslop] [--force]
+           [--max-rounds 3] [--min-confidence 0.6] [--bar 3] [--critic-model alias] [--unslop] [--force]
   brief    [--add "the user's exact words"]
-  set      critic-model | max-rounds | min-confidence | kind | unslop  <value>
+  set      critic-model | max-rounds | min-confidence | bar | kind | unslop  <value>
   scout    print the message for the slop scout (unslop mode)
   avoid    --file <scout reply|->   check and save the scout's avoid list
+  pick     --variant <capture dir>[,<dir>...] --variant ...   blind side-by-side bundle: a critic picks the strongest direction
+  pick-gate --review <file|-> [--transcript auto|<file.jsonl>]   check the pick and record the winner
   bundle   <capture dir|file>... [--include-video] [--force]
   gate     --review <file|->  [--reviewer subagent|headless|human|self] [--model name]
            [--transcript auto|<file.jsonl>]   verify coverage and code-blindness from the critic's real tool calls
+  requests [--run]   turn the critic's capture requests into capture commands (and run them with --run)
   respond  <finding-id> fixed|disputed|wont-fix "<note>" [--evidence image] [--quote "brief words"]
   status   [--json]
   doctor   what this machine can capture with, which critic runners exist, and what to use`;
@@ -36,7 +40,9 @@ const REGATE = new Set(['RERUN_CRITIC', 'STOP_CRITIC_UNRELIABLE']);
 const BUCKET_RANK = { must_fix: 0, verify: 1, polish: 2, ignored: 3 };
 const WARN_IMAGES = 20;
 const MAX_IMAGES = 40;
-const BOOLEAN_FLAGS = new Set(['force', 'include-video', 'json', 'help', 'unslop']);
+const MAX_ZOOMS = 6; // round 2+: at most this many close-ups of regions earlier findings boxed
+const DEFAULT_BAR = 3; // every scored rubric criterion must reach this, or it becomes a must-fix "lift"
+const BOOLEAN_FLAGS = new Set(['force', 'include-video', 'json', 'help', 'unslop', 'run']);
 
 const die = (msg, code = 1) => { console.error(`frame-judge: ${msg}`); process.exit(code); };
 const readText = (p) => fs.readFileSync(p, 'utf8').replace(/^﻿/, '');
@@ -109,6 +115,60 @@ function slugId(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'artifact';
 }
 
+// Width and height of a PNG or JPEG, read from its header (no decoding), or null.
+function imageSize(file) {
+  let b;
+  try { b = fs.readFileSync(file); } catch { return null; }
+  if (b.length > 24 && b.readUInt32BE(0) === 0x89504e47) return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8) {
+    for (let i = 2; i + 9 < b.length;) {
+      if (b[i] !== 0xff) { i++; continue; }
+      const m = b[i + 1];
+      const len = b.readUInt16BE(i + 2);
+      if (m >= 0xc0 && m <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(m)) return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+      i += 2 + len;
+    }
+  }
+  return null;
+}
+
+// A finding's region on its artifact: [x, y, w, h] as fractions of the image (0 to 1). Pixels and
+// percentages are converted when they clearly are ones. Returns null when there's no usable box.
+function parseBox(raw, size) {
+  if (!Array.isArray(raw) || raw.length !== 4) return null;
+  let v = raw.map(Number);
+  if (!v.every(Number.isFinite) || v.some((n) => n < 0)) return null;
+  if (Math.max(...v) > 1) {
+    if (size && v[0] + v[2] <= size.w * 1.01 && v[1] + v[3] <= size.h * 1.01) v = [v[0] / size.w, v[1] / size.h, v[2] / size.w, v[3] / size.h];
+    else if (Math.max(...v) <= 100) v = v.map((n) => n / 100);
+    else return null;
+  }
+  const [x, y] = v.map((n) => Math.min(1, n));
+  const w = Math.min(v[2], 1 - x);
+  const h = Math.min(v[3], 1 - y);
+  if (!(w > 0.002 && h > 0.002)) return null;
+  return [x, y, w, h].map((n) => Number(n.toFixed(4)));
+}
+
+function hasFfmpeg() {
+  try { return !spawnSync('ffmpeg', ['-version'], { encoding: 'utf8', windowsHide: true }).error; } catch { return false; }
+}
+
+// Crop a boxed region (padded) out of an image and enlarge it, or draw the box onto a copy. ffmpeg only.
+function ffImage(src, dest, box, mode) {
+  const [x, y, w, h] = box;
+  let filter;
+  if (mode === 'zoom') {
+    const px = Math.max(0, x - w * 0.25), py = Math.max(0, y - h * 0.25);
+    const pw = Math.min(1 - px, w * 1.5), ph = Math.min(1 - py, h * 1.5);
+    filter = `crop=w=iw*${pw.toFixed(4)}:h=ih*${ph.toFixed(4)}:x=iw*${px.toFixed(4)}:y=ih*${py.toFixed(4)},scale=w='min(1568\\,iw*3)':h=-2:flags=lanczos`;
+  } else {
+    filter = `drawbox=x=iw*${x}:y=ih*${y}:w=iw*${w}:h=ih*${h}:color=0xff1744@0.95:t=4`;
+  }
+  const r = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', src, '-vf', filter, '-frames:v', '1', '-update', '1', dest], { encoding: 'utf8', windowsHide: true });
+  return r.status === 0 && exists(dest);
+}
+
 function walk(dir) {
   const out = [];
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -119,14 +179,16 @@ function walk(dir) {
   return out.sort();
 }
 
-function extractJson(raw) {
+const isReview = (v) => Array.isArray(v.findings);
+const isPick = (v) => Array.isArray(v.ranking) || typeof v.winner === 'string';
+function extractJson(raw, match = isReview) {
   const s = String(raw ?? '').replace(/^﻿/, '').trim();
   const tryParse = (t) => { try { const v = JSON.parse(t); return v && typeof v === 'object' ? v : null; } catch { return null; } };
   const unwrap = (v, depth = 0) => {
     if (!v || depth > 3) return null;
-    if (Array.isArray(v.findings)) return v;
+    if (match(v)) return v;
     if (v.structured_output && typeof v.structured_output === 'object') return unwrap(v.structured_output, depth + 1);
-    if (typeof v.result === 'string') return extractJson(v.result);
+    if (typeof v.result === 'string') return extractJson(v.result, match);
     return null;
   };
   let v = unwrap(tryParse(s));
@@ -167,6 +229,8 @@ function cmdInit(args) {
   if (!(maxRounds >= 1)) die('--max-rounds must be 1 or more');
   const minConf = args['min-confidence'] !== undefined ? Number(one(args['min-confidence'])) : 0.6;
   if (!(minConf > 0 && minConf <= 1)) die('--min-confidence must be between 0 and 1');
+  const bar = args.bar !== undefined ? parseInt(one(args.bar), 10) : DEFAULT_BAR;
+  if (!(bar >= 1 && bar <= 5)) die('--bar must be a whole number from 1 (off) to 5');
 
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, '.gitignore'), '*\n');
@@ -191,6 +255,7 @@ function cmdInit(args) {
     kinds,
     max_rounds: maxRounds,
     min_confidence: minConf,
+    quality_bar: bar,
     critic_model: args['critic-model'] ? String(one(args['critic-model'])) : null,
     unslop: Boolean(args.unslop),
     refs,
@@ -201,7 +266,7 @@ function cmdInit(args) {
   saveLedger(dir, ledger);
   console.log(`frame-judge: initialized ${rel(dir)}`);
   console.log(`  brief: ${trunc(brief, 100)}`);
-  console.log(`  kinds: ${kinds.length ? kinds.join(', ') : 'auto (from captures)'} · max rounds: ${maxRounds} · critic model: ${ledger.critic_model || 'not chosen yet: ask the user before round 1'}`);
+  console.log(`  kinds: ${kinds.length ? kinds.join(', ') : 'auto (from captures)'} · max rounds: ${maxRounds} · quality bar: ${bar}/5 · critic model: ${ledger.critic_model || 'not chosen yet: ask the user before round 1'}`);
   if (refs.length) console.log(`  reference images: ${refs.length}`);
   if (ledger.unslop) console.log('  unslop: ON. Next run "judge.mjs scout" and send the slop scout out BEFORE you build.');
   console.log('next: build, capture (capture-page.mjs / video-frames.mjs), then "judge.mjs bundle <capture dirs>"');
@@ -263,8 +328,13 @@ function cmdSet(args) {
   const dir = stateDir(args);
   const ledger = loadLedger(dir);
   const [key, value] = args._;
-  if (!key || value === undefined) die('usage: judge.mjs set critic-model|max-rounds|min-confidence|kind|unslop <value>');
+  if (!key || value === undefined) die('usage: judge.mjs set critic-model|max-rounds|min-confidence|bar|kind|unslop <value>');
   if (key === 'critic-model') ledger.critic_model = String(value);
+  else if (key === 'bar' || key === 'quality-bar') {
+    const n = parseInt(value, 10);
+    if (!(n >= 1 && n <= 5)) die('bar must be a whole number from 1 (off) to 5');
+    ledger.quality_bar = n;
+  }
   else if (key === 'unslop') {
     if (!/^(on|off|true|false|yes|no)$/i.test(value)) die('unslop must be on or off');
     ledger.unslop = /^(on|true|yes)$/i.test(value);
@@ -366,6 +436,8 @@ function cmdBundle(args) {
     return id;
   };
 
+  // Builder-side only (bundle.lock.json): where each artifact came from, so "judge.mjs requests" can recapture.
+  const origins = [];
   for (const src of sources) {
     const abs = path.resolve(src);
     if (!exists(abs)) die(`not found: ${src}`);
@@ -376,10 +448,13 @@ function cmdBundle(args) {
         if (cap.kind_hint) kindHints.add(cap.kind_hint);
         const label = path.basename(abs);
         if (cap.measurements && Object.keys(cap.measurements).length) measurements[label] = cap.measurements;
+        const origin = { dir: abs, tool: cap.tool || null, source: cap.url || cap.source || null, artifacts: {} };
         for (const a of cap.artifacts || []) {
           if (a.type === 'video' && !includeVideo) continue;
-          addFile(path.resolve(abs, a.file), a);
+          const id = addFile(path.resolve(abs, a.file), a);
+          if (id) origin.artifacts[id] = { viewport: a.viewport ?? null, scroll_y: a.scroll_y ?? null, type: a.type || null, window: a.window ?? null };
         }
+        origins.push(origin);
       } else {
         for (const f of walk(abs)) addFile(f);
       }
@@ -433,6 +508,34 @@ function cmdBundle(args) {
     }
   }
 
+  // Close-ups: where an open finding boxed a region of an artifact that this round has again (same id),
+  // crop that region out of THIS round's capture and enlarge it, so the critic can settle it in detail.
+  const zoomOf = {};
+  if (round > 1 && hasFfmpeg()) {
+    const zoomDir = path.join(roundDir, 'zooms');
+    fs.rmSync(zoomDir, { recursive: true, force: true });
+    let budget = MAX_ZOOMS;
+    for (const [fid, f] of Object.entries(ledger.findings)) {
+      if (budget <= 0) break;
+      if (!['must_fix', 'verify'].includes(f.bucket) || !OPEN.has(f.status)) continue;
+      for (const e of f.evidence || []) {
+        if (!e.box || budget <= 0) continue;
+        const cur = artifacts.find((a) => a.id === e.artifact && !['previous_round', 'reference', 'dispute_evidence', 'zoom'].includes(a.type));
+        if (!cur || !IMAGE_EXT.has(path.extname(cur.file).toLowerCase())) continue;
+        fs.mkdirSync(zoomDir, { recursive: true });
+        const tmp = path.join(zoomDir, `zoom-${slugId(fid)}.png`);
+        if (!ffImage(path.join(bundleDir, cur.file), tmp, e.box, 'zoom')) continue;
+        const id = addFile(tmp, {
+          id: `zoom-${fid}`,
+          type: 'zoom',
+          shows: `close-up from this round's ${cur.id}: the region prior finding ${fid} pointed at (x ${Math.round(e.box[0] * 100)}–${Math.round((e.box[0] + e.box[2]) * 100)}%, y ${Math.round(e.box[1] * 100)}–${Math.round((e.box[1] + e.box[3]) * 100)}% of the image), enlarged. It adds no detail beyond the capture's resolution.`,
+        });
+        if (id) { (zoomOf[fid] ||= []).push(id); budget--; }
+        break;
+      }
+    }
+  }
+
   const imageCount = artifacts.filter((a) => IMAGE_EXT.has(path.extname(a.file))).length;
   if (!artifacts.some((a) => !['reference', 'dispute_evidence', 'previous_round'].includes(a.type)))
     die('no visual artifacts found in the given sources (only png/jpg/webp/gif, plus video with --include-video)');
@@ -472,6 +575,7 @@ function cmdBundle(args) {
       if (f.brief_quote) p.brief_quote = f.brief_quote;
       const before = (f.evidence || []).map((e) => beforeOf[e.artifact]).filter(Boolean);
       if (before.length) p.before_artifacts = before;
+      if (zoomOf[fid]) p.zoom_artifacts = zoomOf[fid];
       const resp = f.response;
       const fresh = resp && resp.round >= f.last_open_round && OPEN.has(f.status);
       if (fresh && resp.action === 'disputed' && disputeIds[fid]) p.dispute = { claim: trunc(resp.note, 300), evidence_artifact: disputeIds[fid] };
@@ -485,6 +589,7 @@ function cmdBundle(args) {
     round,
     kinds,
     criteria,
+    quality_bar: ledger.quality_bar ?? DEFAULT_BAR,
     note: 'Artifact labels are mechanical descriptions written by capture scripts. They are not claims about quality.',
     image_count: imageCount,
     artifacts,
@@ -498,6 +603,7 @@ function cmdBundle(args) {
     brief_sha256: sha256(brief),
     avoid_sha256: avoid ? sha256(avoid) : null,
     kinds,
+    origins,
   });
 
   const textSection = (name, body) => `\n\n======== ${name} ========\n\n${body.trim()}\n`;
@@ -520,7 +626,7 @@ function cmdBundle(args) {
   saveLedger(dir, ledger);
 
   console.log(`frame-judge: round ${round}/${ledger.max_rounds} bundle ready at ${rel(bundleDir)}`);
-  console.log(`  ${artifacts.length} artifacts (${imageCount} images) · kinds: ${kinds.join(', ')}${prior ? ` · prior findings: ${prior.findings.length}` : ''}`);
+  console.log(`  ${artifacts.length} artifacts (${imageCount} images) · kinds: ${kinds.join(', ')} · quality bar ${manifest.quality_bar}/5${prior ? ` · prior findings: ${prior.findings.length}` : ''}${Object.keys(zoomOf).length ? ` · close-ups: ${Object.keys(zoomOf).length}` : ''}`);
   if (skipped.length) console.log(`  skipped ${skipped.length} non-visual or missing file(s): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}`);
   if (imageCount > WARN_IMAGES) console.log(`  warning: ${imageCount} images. Past ~20 per request, Claude tightens image limits and cost climbs. Prefer sheets, fewer slices, tighter crops.`);
   console.log(`  critic model: ${ledger.critic_model || 'NOT CHOSEN. Ask the user once, then: judge.mjs set critic-model <alias>'}`);
@@ -713,6 +819,15 @@ function cmdGate(args) {
   const leaked = Boolean(audit && audit.leaks.length);
   if (leaked) notes.push(`the critic touched things outside its bundle, so this review isn't code-blind and doesn't count: ${audit.leaks.slice(0, 5).join('; ')}`);
 
+  const sizeCache = new Map();
+  const sizeOf = (id) => {
+    if (!sizeCache.has(id)) {
+      const a = manifest.artifacts.find((x) => x.id === id);
+      sizeCache.set(id, a && IMAGE_EXT.has(path.extname(a.file).toLowerCase()) ? imageSize(path.join(bundleDir, a.file)) : null);
+    }
+    return sizeCache.get(id);
+  };
+  let droppedBoxes = 0;
   const checkEvidence = (ev) => {
     const list = Array.isArray(ev) ? ev : ev ? [ev] : [];
     const good = [], bad = [], unopened = [];
@@ -727,7 +842,14 @@ function cmdGate(args) {
       const id = resolveArtifact(ref);
       if (!id) bad.push(String(ref));
       else if (opened && !opened.has(id)) unopened.push(id);
-      else good.push({ artifact: id, at });
+      else {
+        const item = { artifact: id, at };
+        if (e && typeof e === 'object' && e.box != null) {
+          const box = parseBox(e.box, sizeOf(id));
+          if (box) item.box = box; else droppedBoxes++;
+        }
+        good.push(item);
+      }
     }
     return { good, bad, unopened, total: list.length };
   };
@@ -843,6 +965,58 @@ function cmdGate(args) {
   if (notVisual.length) notes.push(`${notVisual.length} ask(s) can't be seen in any render, so the critic didn't check them. Check each one yourself and report it as self-checked: ${notVisual.map((q) => `"${trunc(q, 60)}"`).join(', ')}`);
   if (asks.length && notVisual.length === asks.length) warnings.push('the critic marked every ask not_visual, so nothing in the brief was checked against the captures. If any of them shows on screen, run a fresh critic.');
 
+  const scores = Array.isArray(review.scores)
+    ? review.scores.filter((s) => s && typeof s === 'object').map((s) => ({ criterion: String(s.criterion), score: Number(s.score) }))
+    : review.scores && typeof review.scores === 'object'
+      ? Object.entries(review.scores).map(([criterion, score]) => ({ criterion, score: Number(score) }))
+      : [];
+  for (const s of scores) if (!Number.isInteger(s.score) || s.score < 1 || s.score > 5) warnings.push(`score for "${s.criterion}" isn't an integer from 1 to 5`);
+  const unexplained = scores.filter((s) => Number.isInteger(s.score) && s.score <= 2 && !valid.some((f) => f.criterion === s.criterion)).map((s) => `${s.criterion} (${s.score})`);
+  if (unexplained.length) warnings.push(`low scores with no finding under the same criterion: ${unexplained.join(', ')}`);
+
+  // ---- elevate: what the critic says would raise each criterion, with evidence. Below the quality bar it's a must-fix. ----
+  const elevate = [];
+  (Array.isArray(review.elevate) ? review.elevate : []).forEach((e, i) => {
+    if (!e || typeof e !== 'object') return;
+    const criterion = String(e.criterion ?? '').trim();
+    const change = String(e.change ?? '').trim();
+    const ev = checkEvidence(e.evidence);
+    if (!change) { warnings.push(`elevate ${i + 1} dropped: it says no change`); return; }
+    if (!ev.good.length) { warnings.push(`elevate ${i + 1} dropped: ${ev.total ? evidenceErrors(ev) : 'no evidence'}`); return; }
+    if (criteria.size && !criteria.has(criterion)) warnings.push(`elevate ${i + 1}: criterion "${criterion}" isn't in the rubric`);
+    elevate.push({ criterion, change, why: String(e.why ?? '').trim(), evidence: ev.good });
+  });
+  const bar = ledger.quality_bar ?? DEFAULT_BAR;
+  const lifted = new Set();
+  let liftN = 0;
+  for (const s of scores) {
+    if (!Number.isInteger(s.score) || s.score < 1 || s.score >= bar || lifted.has(s.criterion)) continue;
+    if (criteria.size && !criteria.has(s.criterion)) continue;
+    lifted.add(s.criterion);
+    // A confident blocker or major under the same criterion already carries it.
+    if (valid.some((f) => f.criterion === s.criterion && ['blocker', 'major'].includes(f.severity) && f.confidence >= minConf)) continue;
+    const ups = elevate.filter((e) => e.criterion === s.criterion);
+    let id = `L${++liftN}`;
+    while (seenIds.has(id)) id = `${id}x`;
+    seenIds.add(id);
+    const prior = Object.entries(ledger.findings).find(([, f]) => f.from_lift && f.criterion === s.criterion && f.status !== 'rejected');
+    valid.push({
+      id, kind: 'quality', criterion: s.criterion, severity: 'major',
+      confidence: Math.max(minConf, 0.7),
+      evidence: ups.length ? ups.flatMap((u) => u.evidence).slice(0, 4) : [{ artifact: 'measurements', at: `scores.${s.criterion}` }],
+      observation: `${s.criterion} scored ${s.score}/5, below the quality bar of ${bar}/5.${ups.length && ups[0].why ? ` ${ups.map((u) => u.why).filter(Boolean).join(' ')}` : ''}`,
+      problem: `The work doesn't break anything here, but it doesn't reach the quality bar (${bar}: ${bar >= 4 ? 'professional, defensible to a picky senior designer' : 'acceptable'}).`,
+      fix: ups.length ? ups.map((u) => u.change).join(' Also: ') : `Lift ${s.criterion} to ${bar}/5 or better, going by the rubric's "${s.criterion}" section. The critic gave no specific upgrade.`,
+      brief_quote: null,
+      matches_prior: prior ? prior[0] : null,
+      from_lift: true,
+    });
+    if (!ups.length) warnings.push(`${s.criterion} scored ${s.score}/5 (bar ${bar}) and the critic gave no "elevate" entry for it, so the lift ${id} has no specific direction`);
+    notes.push(`${s.criterion} scored ${s.score}/5, below the quality bar of ${bar}, so the gate filed lift ${id} (must-fix)`);
+  }
+  const upgrades = elevate.filter((e) => !lifted.has(e.criterion));
+  if (droppedBoxes) warnings.push(`${droppedBoxes} evidence box(es) dropped: a box is [x, y, w, h] as fractions of the image`);
+
   const bucketOf = (f) => {
     if (f.severity === 'blocker' || f.severity === 'major') return f.confidence >= minConf ? 'must_fix' : 'verify';
     if (f.severity === 'minor') return f.confidence >= 0.5 ? 'polish' : 'ignored';
@@ -852,14 +1026,21 @@ function cmdGate(args) {
   for (const f of valid) buckets[bucketOf(f)].push(f);
   for (const b of Object.values(buckets)) b.sort((a, c) => SEVERITY.indexOf(a.severity) - SEVERITY.indexOf(c.severity) || c.confidence - a.confidence);
 
-  const scores = Array.isArray(review.scores)
-    ? review.scores.filter((s) => s && typeof s === 'object').map((s) => ({ criterion: String(s.criterion), score: Number(s.score) }))
-    : review.scores && typeof review.scores === 'object'
-      ? Object.entries(review.scores).map(([criterion, score]) => ({ criterion, score: Number(score) }))
-      : [];
-  for (const s of scores) if (!Number.isInteger(s.score) || s.score < 1 || s.score > 5) warnings.push(`score for "${s.criterion}" isn't an integer from 1 to 5`);
-  const unexplained = scores.filter((s) => Number.isInteger(s.score) && s.score <= 2 && !valid.some((f) => f.criterion === s.criterion)).map((s) => `${s.criterion} (${s.score})`);
-  if (unexplained.length) warnings.push(`low scores with no finding under the same criterion: ${unexplained.join(', ')}`);
+  // ---- requests: what the critic needs captured, structured so "judge.mjs requests" can turn them into commands ----
+  const requests = [];
+  for (const r of Array.isArray(review.requests) ? review.requests : []) {
+    if (!r || typeof r !== 'object' || !String(r.need ?? '').trim()) continue;
+    const q = { need: String(r.need).trim(), why: String(r.why ?? '').trim(), for: r.for == null ? null : String(r.for) };
+    const aid = r.artifact != null ? resolveArtifact(r.artifact) : null;
+    if (aid) {
+      q.artifact = aid;
+      const box = r.box != null ? parseBox(r.box, sizeOf(aid)) : null;
+      if (box) q.box = box;
+    }
+    if (Array.isArray(r.window) && r.window.length === 2 && r.window.every((n) => Number.isFinite(Number(n))) && Number(r.window[1]) > Number(r.window[0])) q.window = r.window.map(Number);
+    if (typeof r.viewport === 'string' && r.viewport.trim()) q.viewport = r.viewport.trim();
+    requests.push(q);
+  }
 
   let expectedPrior = [];
   const priorPath = path.join(bundleDir, 'prior.json');
@@ -874,6 +1055,29 @@ function cmdGate(args) {
     const ev = checkEvidence(p.evidence);
     if (status !== 'cannot_tell' && !ev.good.length) { warnings.push(`prior ruling ${pid} (${status}) cites no valid artifact, so it's treated as cannot_tell`); status = 'cannot_tell'; }
     if (!rulings.some((r) => r.id === pid)) rulings.push({ id: pid, status, evidence: ev.good, note: String(p.note ?? '').trim() });
+  }
+  // A lift is settled by the score itself: once its criterion reaches the bar, it's resolved.
+  for (const [pid, f] of Object.entries(ledger.findings)) {
+    if (!f.from_lift || !OPEN.has(f.status) || f.status === 'rejected') continue;
+    const s = scores.find((x) => x.criterion === f.criterion && Number.isInteger(x.score));
+    if (!s) continue;
+    const r = rulings.find((x) => x.id === pid);
+    if (s.score >= bar) {
+      if (r) { r.status = 'resolved'; r.note = `${r.note ? `${r.note} ` : ''}(${f.criterion} scored ${s.score}/5, at or above the bar)`; }
+      else rulings.push({ id: pid, status: 'resolved', evidence: [], note: `${f.criterion} scored ${s.score}/5 this round, at or above the bar of ${bar}` });
+    } else if (!r) rulings.push({ id: pid, status: 'still_open', evidence: [], note: `${f.criterion} still scores ${s.score}/5, below the bar of ${bar}` });
+  }
+  // The same review can't both rule a prior finding resolved and raise it again: the new finding wins,
+  // so the prior one stays open (not "resolved", and not a regression, which means it came back in a later round).
+  for (const [bucket, list] of Object.entries(buckets)) {
+    if (bucket === 'ignored') continue;
+    for (const f of list) {
+      const r = f.matches_prior && rulings.find((x) => x.id === f.matches_prior);
+      if (!r || r.status !== 'resolved') continue;
+      r.status = 'still_open';
+      r.note = `${r.note ? `${r.note} ` : ''}(ruled resolved, but this review raised it again as R${round}-${f.id}, so it stays open)`;
+      notes.push(`${r.id}: the critic ruled it resolved and also raised it again as R${round}-${f.id}; it stays open`);
+    }
   }
   const unchecked = expectedPrior.filter((pid) => !rulings.some((r) => r.id === pid));
   if (unchecked.length) warnings.push(`critic didn't rule on prior finding(s) ${unchecked.join(', ')}, so they keep their last status`);
@@ -964,13 +1168,37 @@ function cmdGate(args) {
     gated_at: now(), reviewer, model, attempts: attempt, critic_verdict: verdict, decision, counts,
     gut_reaction: trunc(review.gut_reaction, 300), summary: trunc(review.summary, 600),
     not_visual_asks: notVisual,
+    scores, quality_bar: bar,
   });
+  // For the builder, never the critic: each boxed finding drawn onto a copy of its artifact, plus an enlarged crop.
+  const annotated = [];
+  if (!discard && hasFfmpeg()) {
+    const annDir = path.join(roundDir, 'annotated');
+    fs.rmSync(annDir, { recursive: true, force: true });
+    for (const bucket of ['must_fix', 'verify', 'polish']) {
+      for (const f of buckets[bucket]) {
+        const lid = f.ledger_id || `R${round}-${f.id}`;
+        for (const e of f.evidence) {
+          if (!e.box) continue;
+          const a = manifest.artifacts.find((x) => x.id === e.artifact);
+          if (!a || !IMAGE_EXT.has(path.extname(a.file).toLowerCase())) continue;
+          fs.mkdirSync(annDir, { recursive: true });
+          const base = path.join(annDir, `${slugId(lid)}-${slugId(a.id)}`);
+          const files = [];
+          if (ffImage(path.join(bundleDir, a.file), `${base}.png`, e.box, 'draw')) files.push(`${base}.png`);
+          if (ffImage(path.join(bundleDir, a.file), `${base}-zoom.png`, e.box, 'zoom')) files.push(`${base}-zoom.png`);
+          if (files.length) { f.annotated = (f.annotated || []).concat(files.map(rel)); annotated.push(...files); }
+          if (ledger.findings[lid]) ledger.findings[lid].annotated = f.annotated;
+        }
+      }
+    }
+  }
   saveLedger(dir, ledger);
-  const gate = { round, decision, would_be: wouldBe, reviewer, model, critic_verdict: verdict, min_confidence: minConf, counts, asks, buckets, rejected, prior_rulings: rulings, still_open_from_earlier: priorOpenMustFix, keep: review.keep || [], requests: review.requests || [], scores, warnings, notes };
+  const gate = { round, decision, would_be: wouldBe, reviewer, model, critic_verdict: verdict, min_confidence: minConf, quality_bar: bar, counts, asks, buckets, elevate: upgrades, rejected, prior_rulings: rulings, still_open_from_earlier: priorOpenMustFix, keep: review.keep || [], requests, scores, annotated: annotated.map(rel), warnings, notes };
   writeJson(path.join(roundDir, 'gate.json'), gate);
   if (reviewArg === '-' || path.resolve(String(reviewArg)) !== path.resolve(path.join(roundDir, 'review.json'))) writeJson(path.join(roundDir, 'review.json'), review);
 
-  printDecision({ round, max: ledger.max_rounds, decision, wouldBe, reviewer, model, verdict, coverage, asks: askCounts, gut: review.gut_reaction, buckets, rejected, rulings, priorOpenMustFix, requests: review.requests, warnings, notes, ledger });
+  printDecision({ round, max: ledger.max_rounds, decision, wouldBe, reviewer, model, verdict, coverage, asks: askCounts, gut: review.gut_reaction, buckets, rejected, rulings, priorOpenMustFix, requests, upgrades, annotated, bar, scores, warnings, notes, ledger });
 }
 
 function printDecision(o) {
@@ -978,6 +1206,7 @@ function printDecision(o) {
   L(`frame-judge · round ${o.round}/${o.max} · DECISION: ${o.decision}${o.wouldBe ? ` (would be ${o.wouldBe})` : ''}`);
   L(`critic: ${o.reviewer}${o.model ? ` (${o.model})` : ''}${o.verdict ? ` · critic verdict: ${o.verdict}` : ''}${o.coverage ? ` · images opened: ${o.coverage}` : ''}`);
   if (o.asks && o.asks.total) L(`brief: ${o.asks.met}/${o.asks.total - (o.asks.not_visual || 0)} ${o.asks.not_visual ? 'visual ' : ''}asks met${o.asks.unmet ? ` · ${o.asks.unmet} unmet` : ''}${o.asks.cannot_tell ? ` · ${o.asks.cannot_tell} not shown in the captures` : ''}${o.asks.not_visual ? ` · ${o.asks.not_visual} not visual (yours to check)` : ''}`);
+  if (o.scores && o.scores.length) L(`scores (bar ${o.bar}/5): ${o.scores.map((s) => `${s.criterion} ${s.score}${Number.isInteger(s.score) && s.score < o.bar ? '↓' : ''}`).join(' · ')}`);
   if (o.reason) L(`reason: ${o.reason}`);
   if (o.gut) L(`gut reaction: "${trunc(o.gut, 200)}"`);
   const show = (title, list) => {
@@ -986,14 +1215,19 @@ function printDecision(o) {
     for (const f of list) {
       const lid = f.ledger_id || `R${o.round}-${f.id}`;
       const merged = f.ledger_id && f.ledger_id !== `R${o.round}-${f.id}` ? ` (critic's ${f.id}, same issue as ${f.ledger_id})` : '';
-      L(`  ${lid}${merged}  ${f.severity} ${f.confidence.toFixed(2)}  ${f.kind === 'quality' ? f.criterion : f.kind}: ${trunc(f.observation, 110)}`);
-      if (f.fix) L(`      fix: ${trunc(f.fix, 110)}`);
+      L(`  ${lid}${merged}  ${f.severity} ${f.confidence.toFixed(2)}  ${f.from_lift ? `lift ${f.criterion}` : f.kind === 'quality' ? f.criterion : f.kind}: ${trunc(f.observation, 110)}`);
+      if (f.fix) L(`      fix: ${trunc(f.fix, 160)}`);
+      if (f.annotated && f.annotated.length) L(`      see: ${f.annotated.join('  ')}`);
     }
   };
   if (o.buckets) {
     show('MUST FIX', o.buckets.must_fix);
     show('VERIFY (recapture closer before fixing, don\'t blind-fix)', o.buckets.verify);
     show('POLISH (fix if cheap)', o.buckets.polish);
+  }
+  if (o.upgrades && o.upgrades.length) {
+    L('\nELEVATE (optional: what the critic says would push it higher; do these once must-fix is clear)');
+    for (const u of o.upgrades) L(`  ${u.criterion}: ${trunc(u.change, 140)}`);
   }
   if (o.priorOpenMustFix && o.priorOpenMustFix.length) {
     L('\nSTILL OPEN FROM EARLIER ROUNDS');
@@ -1008,9 +1242,10 @@ function printDecision(o) {
     for (const r of o.rejected) L(`  ${r.id}: ${r.reasons.join('; ')}`);
   }
   if (o.requests && o.requests.length) {
-    L('\nCRITIC REQUESTS (capture these for the next round)');
+    L('\nCRITIC REQUESTS (capture these for the next round; "judge.mjs requests" prints the commands)');
     for (const r of o.requests) if (r && r.need) L(`  - ${trunc(r.need, 120)}${r.for ? ` (for ${r.for})` : ''}`);
   }
+  if (o.annotated && o.annotated.length) L(`\nANNOTATED (for you, not the critic): ${o.annotated.length} image(s) with each boxed finding drawn on it, in ${rel(path.dirname(o.annotated[0]))}`);
   if ((o.warnings && o.warnings.length) || (o.notes && o.notes.length)) {
     L('\nNOTES');
     for (const w of [...(o.notes || []), ...(o.warnings || [])]) L(`  - ${w}`);
@@ -1077,7 +1312,7 @@ function cmdStatus(args) {
   const gated = ledger.rounds.filter((r) => r.gated_at && r.counts);
   const last = gated[gated.length - 1];
   const pending = lastRound(ledger);
-  L(`frame-judge status · ${ledger.rounds.length} round(s) of max ${ledger.max_rounds} · critic model: ${ledger.critic_model || 'not chosen'} · unslop: ${ledger.unslop ? (ledger.avoid ? `on (${ledger.avoid.patterns} patterns avoided)` : 'on, no avoid list yet') : 'off'}`);
+  L(`frame-judge status · ${ledger.rounds.length} round(s) of max ${ledger.max_rounds} · quality bar ${ledger.quality_bar ?? DEFAULT_BAR}/5 · critic model: ${ledger.critic_model || 'not chosen'} · unslop: ${ledger.unslop ? (ledger.avoid ? `on (${ledger.avoid.patterns} patterns avoided)` : 'on, no avoid list yet') : 'off'}`);
   for (const r of ledger.rounds) {
     L(`  round ${r.round}: ${r.decision || (r.gated_at ? 'gated' : 'awaiting review')}${r.reviewer ? ` · ${r.reviewer}${r.model ? `/${r.model}` : ''}` : ''}${r.counts ? ` · must-fix ${r.counts.must_fix}, verify ${r.counts.verify}, polish ${r.counts.polish}, rejected ${r.counts.rejected}, resolved ${r.counts.resolved}` : ''}`);
   }
@@ -1102,6 +1337,12 @@ function cmdStatus(args) {
     if (A.total - nv > 0) L(`Brief: ${A.met} of ${A.total - nv} ${nv ? 'visual' : 'explicit'} asks met, each checked by the critic against the captures${A.cannot_tell ? ` (${A.cannot_tell} not shown in the captures)` : ''}`);
     if (nv) L(`Not visual, so NOT checked by the critic (say how you checked each one, or that you didn't): ${(last.not_visual_asks || []).map((q) => `"${trunc(q, 70)}"`).join(' · ')}`);
   }
+  if (last.scores && last.scores.length) {
+    const firstScored = gated.find((r) => r.scores && r.scores.length);
+    const was = (c) => { const s = firstScored && firstScored !== last && firstScored.scores.find((x) => x.criterion === c); return s ? `${s.score}→` : ''; };
+    L(`Scores (critic, bar ${last.quality_bar ?? ledger.quality_bar ?? DEFAULT_BAR}/5): ${last.scores.map((s) => `${s.criterion} ${was(s.criterion)}${s.score}`).join(' · ')}`);
+  }
+  if (ledger.pick && ledger.pick.winner) L(`Direction: picked blind from ${ledger.pick.variants} variants by a critic (${ledger.pick.winner_label} won)`);
   if (firstGut) L(`Round ${firstGut.round} gut reaction: "${firstGut.gut_reaction}"`);
   if (!passed) L(`Not passed. ${open.filter(([, f]) => f.bucket === 'must_fix').length} must-fix item(s) still open.`);
   if (fixed.length) L(`Fixed: ${fixed.map(([id, f]) => label(id, f)).join(' · ')}`);
@@ -1109,6 +1350,272 @@ function cmdStatus(args) {
   if (disputed.length) L(`Disputed: ${disputed.map(([id, f]) => `${id} → ${f.status === 'resolved' ? 'critic accepted the dispute' : 'critic upheld it'}`).join(' · ')}`);
   if (unanswered.length) L(`Unanswered must-fix: ${unanswered.map(([id]) => id).join(', ')}`);
   L(`Captures: ${last.bundle}/artifacts`);
+}
+
+const VIEWPORT_SPEC = /^(desktop|laptop|tablet|mobile|\d+x\d+(@\d+(\.\d+)?)?)$/i;
+const shellQuote = (s) => (/^[\w./:@,=+-]+$/.test(String(s)) ? String(s) : `"${String(s).replace(/(["\\$`])/g, '\\$1')}"`);
+
+function cmdRequests(args) {
+  const dir = stateDir(args);
+  const ledger = loadLedger(dir);
+  const g = lastGated(ledger);
+  if (!g) die('no gated round yet.');
+  const roundDir = path.join(dir, `round-${g.round}`);
+  const gate = readJson(path.join(roundDir, 'gate.json'));
+  const lock = readJson(path.join(roundDir, 'bundle.lock.json'));
+  const reqs = [...(gate.requests || [])];
+  // A boxed verify item is a request too: the critic suspected something too small to confirm.
+  for (const f of (gate.buckets && gate.buckets.verify) || []) {
+    const e = (f.evidence || []).find((x) => x.box);
+    const fid = f.ledger_id || `R${g.round}-${f.id}`;
+    if (e && !reqs.some((r) => r.artifact === e.artifact && r.for && fid.endsWith(r.for))) reqs.push({ need: `a closer capture of the region behind verify item ${fid}`, for: fid, artifact: e.artifact, box: e.box });
+  }
+  if (!reqs.length) { console.log('frame-judge: the last round has no capture requests.'); return; }
+  const origins = lock.origins || [];
+  const originOf = (id) => origins.find((o) => o.artifacts && o.artifacts[id]);
+  const scripts = path.join(SKILL_DIR, 'scripts');
+  const outBase = path.join(dir, 'cap', `requests-r${g.round}`);
+  const plan = reqs.map((r, i) => {
+    const out = path.join(outBase, `req-${i + 1}`);
+    const o = r.artifact ? originOf(r.artifact) : null;
+    const meta = o ? o.artifacts[r.artifact] : null;
+    const videoOrigin = (o && o.tool === 'video-frames' ? o : null) || origins.find((x) => x.tool === 'video-frames' && x.source);
+    let argv = null;
+    let hint = null;
+    if (r.window && videoOrigin) {
+      argv = [path.join(scripts, 'video-frames.mjs'), videoOrigin.source, '--out', out, '--as', 'motion', '--motion', `${r.window[0]}-${r.window[1]}`, '--motion-fps', 'source', '--overview', '0', '--keyframes', '0', '--events', '0'];
+    } else if (r.window) {
+      hint = 'no video capture in the last bundle to cut this window from: capture the motion first (capture-page --animate, then video-frames --motion a-b --motion-fps source)';
+    } else if (o && o.tool === 'capture-page' && meta && meta.type === 'viewport' && meta.viewport && r.box && meta.scroll_y != null) {
+      argv = [path.join(scripts, 'capture-page.mjs'), o.source, '--out', out, '--zoom', `${meta.viewport}@${meta.scroll_y}:${r.box.join(',')}`];
+    } else if (o && o.tool === 'capture-page' && meta && meta.type === 'state') {
+      hint = `that's a state shot: add "clip" (the element's selector) to the actions step that made ${r.artifact}, or a "shot" step right after it, and recapture`;
+    } else if (o && o.tool === 'capture-page' && (VIEWPORT_SPEC.test(r.viewport || '') || (meta && meta.viewport))) {
+      argv = [path.join(scripts, 'capture-page.mjs'), o.source, '--out', out, '--viewports', VIEWPORT_SPEC.test(r.viewport || '') ? r.viewport : meta.viewport];
+    } else if (r.viewport && VIEWPORT_SPEC.test(r.viewport) && origins.some((x) => x.tool === 'capture-page')) {
+      argv = [path.join(scripts, 'capture-page.mjs'), origins.find((x) => x.tool === 'capture-page').source, '--out', out, '--viewports', r.viewport];
+    } else {
+      hint = 'capture it by hand: an actions step with "shot" (and "clip"), another viewport, or a --motion window';
+    }
+    return { n: i + 1, need: r.need, for: r.for || null, argv, hint, out: argv ? out : null };
+  });
+  writeJson(path.join(roundDir, 'requests.json'), plan);
+  console.log(`frame-judge: ${plan.length} capture request(s) from round ${g.round}`);
+  const runs = [];
+  for (const p of plan) {
+    console.log(`\n  ${p.n}. ${trunc(p.need, 120)}${p.for ? ` (for ${p.for})` : ''}`);
+    if (p.argv) {
+      console.log(`     node ${p.argv.map(shellQuote).join(' ')}`);
+      runs.push(p);
+    } else console.log(`     -> ${p.hint}`);
+  }
+  if (args.run && runs.length) {
+    console.log('');
+    for (const p of runs) {
+      const r = spawnSync(process.execPath, p.argv, { stdio: 'inherit', windowsHide: true });
+      console.log(`  request ${p.n}: ${r.status === 0 ? `captured into ${rel(p.out)}` : `FAILED (exit ${r.status})`}`);
+    }
+  }
+  const dirs = runs.map((p) => rel(p.out));
+  if (dirs.length) console.log(`\nAfter recapturing EVERYTHING for the next round, add ${args.run ? 'these' : 'the folders these write'} to the bundle too: ${dirs.join(' ')}`);
+}
+
+// ---- pick: blind best-of-N. The critic sees 2 to 4 variants under shuffled neutral labels and picks one. ----
+function shuffled(list) {
+  const a = [...list];
+  for (let i = a.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+function cmdPick(args) {
+  const dir = stateDir(args);
+  const ledger = loadLedger(dir);
+  if (ledger.rounds.length && !args.force) die('pick chooses the direction to build on, so it comes before round 1. Pass --force to run it anyway.');
+  const variants = many(args.variant).map((v) => String(v).split(',').map((s) => s.trim()).filter(Boolean));
+  if (variants.length < 2 || variants.length > 4) die('usage: judge.mjs pick --variant <capture dir>[,<dir>...] --variant <...>   (2 to 4 variants)');
+  const pickDir = path.join(dir, 'pick');
+  const bundleDir = path.join(pickDir, 'bundle');
+  fs.rmSync(pickDir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(bundleDir, 'artifacts'), { recursive: true });
+
+  const labels = ['P', 'Q', 'R', 'S'].slice(0, variants.length);
+  const order = shuffled(variants.map((_, i) => i));
+  const key = {};
+  const artifacts = [];
+  const measurements = {};
+  const kindHints = new Set();
+  for (const [k, label] of labels.entries()) {
+    const dirs = variants[order[k]].map((d) => path.resolve(d));
+    key[label] = dirs;
+    const add = (absFile, meta = {}) => {
+      const ext = path.extname(absFile).toLowerCase();
+      if (!IMAGE_EXT.has(ext) || !exists(absFile)) return;
+      let id = `${label.toLowerCase()}-${slugId(meta.id || path.basename(absFile, ext))}`;
+      for (let n = 2; artifacts.some((a) => a.id === id); n++) id = `${label.toLowerCase()}-${slugId(meta.id || path.basename(absFile, ext))}-${n}`;
+      const file = `artifacts/${id}${ext}`;
+      fs.copyFileSync(absFile, path.join(bundleDir, file));
+      const entry = { id, file, variant: label, type: meta.type || 'image', shows: `variant ${label}: ${meta.shows || 'an image'}` };
+      for (const f of ['viewport', 't', 'window', 'tiles']) if (meta[f] !== undefined) entry[f] = meta[f];
+      artifacts.push(entry);
+    };
+    // Nothing the builder named (folders, files) may reach the critic: names like "safe" or "my-favorite"
+    // would tell it which variant the builder prefers. Capture ids are mechanical; loose files get numbers.
+    let loose = 0;
+    const addLoose = (f) => add(f, { id: `image-${++loose}` });
+    for (const [di, d] of dirs.entries()) {
+      if (!exists(d)) die(`not found: ${d}`);
+      if (!fs.statSync(d).isDirectory()) { addLoose(d); continue; }
+      const capPath = path.join(d, 'capture.json');
+      if (!exists(capPath)) { for (const f of walk(d)) addLoose(f); continue; }
+      const cap = readJson(capPath);
+      if (cap.kind_hint) kindHints.add(cap.kind_hint);
+      if (cap.measurements && Object.keys(cap.measurements).length) measurements[`${label}/capture-${di + 1}`] = cap.measurements;
+      for (const a of cap.artifacts || []) if (a.type !== 'video') add(path.resolve(d, a.file), a);
+    }
+    if (!artifacts.some((a) => a.variant === label)) die(`variant ${variants[order[k]].join(',')} has no images`);
+  }
+  const imageCount = artifacts.length;
+  if (imageCount > MAX_IMAGES && !args.force) die(`${imageCount} images is too many for one pick (cap ${MAX_IMAGES}). Give each variant one viewport set and a contact sheet, or pass --force.`);
+
+  let kinds = ledger.kinds && ledger.kinds.length ? [...ledger.kinds] : [...kindHints].filter((k) => KINDS.includes(k));
+  if (!kinds.length) kinds = ['frontend'];
+  kinds = KINDS.filter((k) => kinds.includes(k));
+  const pickBrief = readText(path.join(REFS, 'pick-brief.md'));
+  const rubric = kinds.map((k) => readText(path.join(REFS, `rubric-${k}.md`)).trim()).join('\n\n---\n\n') + '\n';
+  const criteria = [...new Set([...rubric.matchAll(/^###\s+`([a-z0-9_-]+)`/gm)].map((m) => m[1]))];
+  const brief = sanitizeBrief(readText(path.join(dir, 'brief.md')));
+  fs.writeFileSync(path.join(bundleDir, 'PICK.md'), pickBrief);
+  fs.writeFileSync(path.join(bundleDir, 'rubric.md'), rubric);
+  fs.writeFileSync(path.join(bundleDir, 'brief.md'), brief);
+  const avoidPath = path.join(dir, 'avoid.md');
+  if (ledger.unslop && exists(avoidPath)) fs.writeFileSync(path.join(bundleDir, 'avoid.md'), readText(avoidPath));
+  const manifest = {
+    kind: 'pick', variants: labels, kinds, criteria,
+    note: 'Variant labels were assigned at random and say nothing about order or quality. Artifact labels are mechanical descriptions written by capture scripts.',
+    image_count: imageCount, artifacts, measurements,
+  };
+  writeJson(path.join(bundleDir, 'manifest.json'), manifest);
+  writeJson(path.join(pickDir, 'pick.lock.json'), { created_at: now(), pick_sha256: sha256(pickBrief), rubric_sha256: sha256(rubric), kinds, key });
+  const abs = path.resolve(bundleDir);
+  const spawn = `You are the frame critic, judging a blind pick. Your bundle is ${abs}. Read ${path.join(abs, 'PICK.md')} and follow it exactly. Open nothing outside that folder. Reply with the pick JSON only.`;
+  fs.writeFileSync(path.join(pickDir, 'spawn.txt'), spawn + '\n');
+  ledger.pick = { created_at: now(), variants: labels.length, bundle: rel(bundleDir), gated_at: null, attempts: 0 };
+  saveLedger(dir, ledger);
+  console.log(`frame-judge: pick bundle ready at ${rel(bundleDir)}: ${labels.length} variants, ${imageCount} images, labels shuffled`);
+  if (imageCount > WARN_IMAGES) console.log(`  warning: ${imageCount} images. Past ~20, image limits tighten: one contact sheet or 2 to 4 screens per variant is enough to choose a direction.`);
+  console.log('\nSpawn a FRESH critic (no fork, no extra context) with exactly this message, or run critic-sandbox.mjs --pick:\n');
+  console.log(spawn);
+  console.log(`\nSave its reply to ${rel(path.join(pickDir, 'pick.json'))}, then: judge.mjs pick-gate --review ${rel(path.join(pickDir, 'pick.json'))}`);
+}
+
+function cmdPickGate(args) {
+  const dir = stateDir(args);
+  const ledger = loadLedger(dir);
+  if (!ledger.pick) die('no pick bundle. Run "judge.mjs pick --variant ... --variant ..." first.');
+  const pickDir = path.join(dir, 'pick');
+  const bundleDir = path.join(pickDir, 'bundle');
+  const lock = readJson(path.join(pickDir, 'pick.lock.json'));
+  const manifest = readJson(path.join(bundleDir, 'manifest.json'));
+  const pickNow = readText(path.join(bundleDir, 'PICK.md'));
+  const rubricNow = readText(path.join(bundleDir, 'rubric.md'));
+  const skillRubric = lock.kinds.map((k) => readText(path.join(REFS, `rubric-${k}.md`)).trim()).join('\n\n---\n\n') + '\n';
+  if (sha256(pickNow) !== lock.pick_sha256 || sha256(pickNow) !== sha256(readText(path.join(REFS, 'pick-brief.md'))) || sha256(rubricNow) !== lock.rubric_sha256 || sha256(rubricNow) !== sha256(skillRubric))
+    die('PICK.md or rubric.md in the pick bundle was edited after bundling. Re-run "judge.mjs pick" and a fresh critic.', 2);
+  const reviewArg = one(args.review);
+  if (!reviewArg) die('usage: judge.mjs pick-gate --review <file|-> [--transcript auto|<file.jsonl>]');
+  const raw = reviewArg === '-' ? readStdin() : readText(path.resolve(String(reviewArg)));
+  const attempt = (ledger.pick.attempts || 0) + 1;
+  fs.writeFileSync(path.join(pickDir, `pick.attempt-${attempt}.txt`), raw);
+  const model = args.model ? String(one(args.model)) : ledger.critic_model || null;
+  const notes = [];
+  const fail = (why) => {
+    const decision = attempt >= 2 ? 'STOP_PICK_UNRELIABLE' : 'RERUN_PICK';
+    Object.assign(ledger.pick, { attempts: attempt, decision, gated_at: now(), reason: why });
+    saveLedger(dir, ledger);
+    console.log(`frame-judge · pick · DECISION: ${decision}\nreason: ${why}`);
+    for (const n of notes) console.log(`  - ${n}`);
+    console.log(decision === 'RERUN_PICK' ? '\nNEXT: spawn a FRESH critic on the same pick bundle (same message) and pick-gate again.' : '\nNEXT: two unusable picks. Use a stronger critic model, or skip the pick and build on the variant you think fits the brief, and tell the user it was not picked independently.');
+  };
+  const review = extractJson(raw, isPick);
+  if (!review) return fail('no JSON object with a "ranking" found in the reply');
+
+  const labels = manifest.variants;
+  const ids = new Map(manifest.artifacts.map((a) => [a.id, a]));
+  const resolve = (ref) => {
+    const r = String(ref ?? '').trim().replace(/\\/g, '/').split('/').pop();
+    if (ids.has(r)) return r;
+    const base = r.replace(/\.[a-z0-9]+$/i, '');
+    return ids.has(base) ? base : null;
+  };
+  let audit = null;
+  const tArg = args.transcript && args.transcript !== true ? String(one(args.transcript)) : null;
+  if (tArg) {
+    const tfile = tArg === 'auto' ? findTranscript(path.resolve(bundleDir), Date.parse(ledger.pick.created_at) - 60000) : path.resolve(tArg);
+    if (tfile && exists(tfile)) audit = auditTranscript(tfile, [bundleDir, ...many(args['transcript-bundle']).map(String)]);
+    else notes.push(tArg === 'auto' ? 'no critic transcript found, so coverage is self-reported' : `transcript not found: ${tArg}`);
+  }
+  if (audit && audit.leaks.length) return fail(`the critic touched things outside its bundle: ${audit.leaks.slice(0, 3).join('; ')}`);
+  const opened = audit
+    ? new Set([...audit.opened].filter((p) => /[\\/]artifacts[\\/]/.test(p)).map((p) => resolve(path.basename(p))).filter(Boolean))
+    : Array.isArray(review.opened) ? new Set(review.opened.map(resolve).filter(Boolean)) : null;
+  if (!opened) return fail('the critic didn\'t list what it opened ("opened")');
+  const skipped = [...ids.keys()].filter((id) => !opened.has(id));
+  if (skipped.length) return fail(`a pick needs every image looked at; the critic (${audit ? 'verified' : 'self-reported'}) skipped ${skipped.join(', ')}`);
+
+  const ev = (list, label) => (Array.isArray(list) ? list : []).map((e) => {
+    const id = resolve(e && e.artifact);
+    return id && opened.has(id) && (!label || ids.get(id).variant === label) ? { artifact: id, at: String(e.at ?? '') } : null;
+  }).filter(Boolean);
+  const ranking = (Array.isArray(review.ranking) ? review.ranking : []).map((x) => String(x).trim().toUpperCase());
+  if (ranking.length !== labels.length || !labels.every((l) => ranking.includes(l))) return fail(`"ranking" must list every variant exactly once (${labels.join(', ')}), best first`);
+  const winner = ranking[0];
+  if (review.winner && String(review.winner).trim().toUpperCase() !== winner) notes.push(`"winner" (${review.winner}) disagrees with ranking[0] (${winner}); the ranking wins`);
+  const perVariant = {};
+  for (const v of Array.isArray(review.variants) ? review.variants : []) {
+    const l = String(v && v.label || '').trim().toUpperCase();
+    if (!labels.includes(l)) continue;
+    perVariant[l] = {
+      scores: (Array.isArray(v.scores) ? v.scores : []).filter((s) => s && Number.isInteger(Number(s.score))).map((s) => ({ criterion: String(s.criterion), score: Number(s.score) })),
+      asks_met: Number.isFinite(Number(v.asks_met)) ? Number(v.asks_met) : null,
+      asks_total: Number.isFinite(Number(v.asks_total)) ? Number(v.asks_total) : null,
+      strengths: (v.strengths || []).map((s) => ({ what: String(s && s.what || ''), evidence: ev(s && s.evidence, l) })).filter((s) => s.what && s.evidence.length),
+      weaknesses: (v.weaknesses || []).map((s) => ({ what: String(s && s.what || ''), evidence: ev(s && s.evidence, l) })).filter((s) => s.what && s.evidence.length),
+    };
+  }
+  const missingV = labels.filter((l) => !perVariant[l]);
+  if (missingV.length) return fail(`no assessment for variant(s) ${missingV.join(', ')}: each one is judged on its own before they're compared`);
+  const decisive = (Array.isArray(review.decisive) ? review.decisive : []).map((d) => ({ what: String(d && d.what || ''), evidence: ev(d && d.evidence) })).filter((d) => d.what && d.evidence.length);
+  if (!decisive.length || !decisive.some((d) => d.evidence.some((e) => ids.get(e.artifact).variant === winner))) return fail('the pick cites no valid evidence from the winning variant for why it won');
+  const carry = (Array.isArray(review.carry_over) ? review.carry_over : []).map((c) => {
+    const from = String(c && c.from || '').trim().toUpperCase();
+    return labels.includes(from) && from !== winner ? { from, what: String(c.what || ''), evidence: ev(c.evidence, from) } : null;
+  }).filter((c) => c && c.what && c.evidence.length);
+  const margin = ['clear', 'slight', 'tie'].includes(norm(review.margin)) ? norm(review.margin) : 'unstated';
+
+  Object.assign(ledger.pick, {
+    attempts: attempt, decision: 'PICKED', gated_at: now(), model,
+    winner_label: winner, winner: lock.key[winner].map(rel),
+    ranking: ranking.map((l) => ({ label: l, dirs: lock.key[l].map(rel), scores: perVariant[l].scores })),
+    margin, why: trunc(review.why, 600), carry_over: carry.map((c) => ({ from: c.from, from_dirs: lock.key[c.from].map(rel), what: c.what })),
+    coverage: `${opened.size}/${ids.size} ${audit ? 'verified' : 'self-reported'}`,
+  });
+  saveLedger(dir, ledger);
+  writeJson(path.join(pickDir, 'gate.json'), { decision: 'PICKED', winner, ranking, margin, variants: perVariant, decisive, carry_over: carry, key: lock.key, notes });
+
+  const L = (s = '') => console.log(s);
+  L(`frame-judge · pick · DECISION: PICKED · images opened ${ledger.pick.coverage}${model ? ` · critic ${model}` : ''}`);
+  L(`winner: variant ${winner} (${margin} margin) = ${ledger.pick.winner.join(', ')}`);
+  for (const [i, l] of ranking.entries()) {
+    const p = perVariant[l];
+    L(`  ${i + 1}. ${l}  ${lock.key[l].map(rel).join(', ')}${p.asks_total ? `  asks ${p.asks_met}/${p.asks_total}` : ''}${p.scores.length ? `  scores ${p.scores.map((s) => `${s.criterion} ${s.score}`).join(' · ')}` : ''}`);
+  }
+  if (review.why) L(`why: ${trunc(review.why, 300)}`);
+  if (carry.length) {
+    L('\nCARRY OVER (worth taking from the losers):');
+    for (const c of carry) L(`  from ${c.from} (${lock.key[c.from].map(rel).join(', ')}): ${trunc(c.what, 140)}`);
+  }
+  for (const n of notes) L(`  - ${n}`);
+  L(`\nNEXT: build on the winner${carry.length ? ', folding in the carry-over items' : ''}. Then capture it and run round 1 as usual (bundle, critic, gate).${margin === 'tie' ? ' The critic called it a tie: say so to the user and let them choose.' : ''}`);
 }
 
 async function cmdDoctor() {
@@ -1151,7 +1658,7 @@ async function cmdDoctor() {
 
 const [cmd, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
-const commands = { doctor: cmdDoctor, init: cmdInit, brief: cmdBrief, set: cmdSet, scout: cmdScout, avoid: cmdAvoid, bundle: cmdBundle, gate: cmdGate, respond: cmdRespond, status: cmdStatus };
+const commands = { doctor: cmdDoctor, init: cmdInit, brief: cmdBrief, set: cmdSet, scout: cmdScout, avoid: cmdAvoid, pick: cmdPick, 'pick-gate': cmdPickGate, bundle: cmdBundle, gate: cmdGate, requests: cmdRequests, respond: cmdRespond, status: cmdStatus };
 if (!cmd || cmd === 'help' || cmd === '--help' || !commands[cmd]) {
   console.log(HELP);
   process.exit(cmd && cmd !== 'help' && cmd !== '--help' ? 1 : 0);
